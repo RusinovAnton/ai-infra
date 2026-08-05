@@ -11,13 +11,6 @@
 	"tagOwners": {
 		"tag:gateway": ["autogroup:admin"],
 		"tag:gpu":     ["autogroup:admin"],
-
-		// TRANSITIONAL — remove once no device advertises tag:testbed.
-		// A tag must exist here before a device can advertise it, and a live
-		// device should never hold a tag this file does not define. So the
-		// retag is two saves: keep this line, move the device to tag:gateway,
-		// then delete this line in a second push.
-		"tag:testbed": ["autogroup:admin"],
 	},
 
 	// There is deliberately NO `groups` block, so this file contains no
