@@ -48,6 +48,17 @@ gh secret set TS_OAUTH_CLIENT_ID
 gh secret set TS_OAUTH_CLIENT_SECRET
 ```
 
+3. Add the tailnet name. It is a **required** input, it is the name the console
+   shows (`example.com`, `yourorg.github`) — not the `tail1a2b3.ts.net` MagicDNS
+   suffix — and the action does not accept the API's `-` shorthand:
+
+```bash
+gh secret set TS_TAILNET
+```
+
+Leave it unset and the run fails with `404 tailnet "acl" not found`, which looks
+like a broken policy file. The workflow's preflight step names the real cause.
+
 Once this is live, **console edits get silently reverted by the next push to
 `main`.** That is the point. It also means an emergency console change is
 temporary — see

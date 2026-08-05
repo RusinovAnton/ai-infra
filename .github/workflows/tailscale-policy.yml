@@ -13,10 +13,14 @@ name: Sync Tailscale policy
 #   `policy_file` write scope. In the current console that lives under
 #   Settings -> Trust credentials, not "OAuth clients".
 #
-# `tailnet: "-"` is required, not optional. Left unset the action sends an empty
-# tailnet and the API answers 404 `tailnet "acl" not found`, which reads like a
-# missing policy file rather than a missing parameter. "-" means "the default
-# tailnet of these credentials", which avoids naming the tailnet in this file.
+#   TS_TAILNET — the tailnet name, as the admin console shows it (looks like
+#   `example.com`, `yourorg.github`). The action declares this input as required
+#   and does NOT accept the API's usual `-` shorthand for "default tailnet".
+#
+# Left empty the action still runs and the API answers 404
+# `tailnet "acl" not found` -- the URL collapses to /tailnet//acl, so the error
+# names a path segment rather than the missing parameter and reads like a broken
+# policy file. The preflight step below turns that into a clear message.
 
 on:
   push:
@@ -37,12 +41,27 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Preflight — required secrets are set
+        env:
+          TAILNET: ${{ secrets.TS_TAILNET }}
+          CID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          CSECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+        run: |
+          missing=
+          [ -n "$TAILNET" ] || missing="$missing TS_TAILNET"
+          [ -n "$CID" ]     || missing="$missing TS_OAUTH_CLIENT_ID"
+          [ -n "$CSECRET" ] || missing="$missing TS_OAUTH_CLIENT_SECRET"
+          if [ -n "$missing" ]; then
+            echo "::error::missing repo secrets:$missing — see docs/tailnet-admin.md#policy-as-code"
+            exit 1
+          fi
+
       - name: Test policy (dry run)
         uses: tailscale/gitops-acl-action@v1
         with:
           action: test
           policy-file: ./policy/tailnet-policy.hujson
-          tailnet: '-'
+          tailnet: ${{ secrets.TS_TAILNET }}
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
 
@@ -52,6 +71,6 @@ jobs:
         with:
           action: apply
           policy-file: ./policy/tailnet-policy.hujson
-          tailnet: '-'
+          tailnet: ${{ secrets.TS_TAILNET }}
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
