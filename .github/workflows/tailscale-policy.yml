@@ -1,0 +1,49 @@
+name: Sync Tailscale policy
+
+# GitOps for policy/tailnet-policy.hujson.
+#
+# On a pull request the action only *tests* the policy (including the `tests`
+# block, which Tailscale refuses to save when failing). On a push to the
+# default branch it applies it. That ordering is the whole point: policy
+# changes go through review, and a policy that would lock the gateway out of
+# the engine fails the PR rather than production.
+#
+# Requires two repo secrets:
+#   TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET  — OAuth client with the
+#   `policy_file` write scope (admin console -> Settings -> OAuth clients).
+
+on:
+  push:
+    branches: [main]
+    paths: ['policy/tailnet-policy.hujson', '.github/workflows/tailscale-policy.yml']
+  pull_request:
+    branches: [main]
+    paths: ['policy/tailnet-policy.hujson', '.github/workflows/tailscale-policy.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Test policy (dry run)
+        uses: tailscale/gitops-acl-action@v1
+        with:
+          action: test
+          policy-file: ./policy/tailnet-policy.hujson
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+
+      - name: Apply policy
+        if: github.event_name != 'pull_request'
+        uses: tailscale/gitops-acl-action@v1
+        with:
+          action: apply
+          policy-file: ./policy/tailnet-policy.hujson
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}

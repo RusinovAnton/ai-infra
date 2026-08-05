@@ -1,0 +1,48 @@
+# Stand a fake engine next to the gateway so the whole path is exercisable with
+# no GPU and no spend. TEST FIXTURE — never layered on the office server.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mock-engine.yml up -d
+#
+# Note what is NOT here: config.yaml, the aliases, the router settings, the key
+# scoping and the privacy settings are all untouched. The only thing that
+# changes is ENGINE_API_BASE, which was already an environment variable. That is
+# what makes this a faithful test rather than a second configuration to keep in
+# sync.
+#
+# What it proves and what it cannot: see the docstring in mock_engine.py.
+services:
+  mock-engine:
+    # python:3.12-alpine as of 2026-08-05
+    image: python@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df
+    container_name: ai-infra-mock-engine
+    restart: unless-stopped
+    volumes:
+      - ./mock_engine.py:/app/mock_engine.py:ro
+    environment:
+      # Same secret the gateway sends, so a stale value fails loudly here —
+      # which is how the rotation path in gpu-up.sh gets tested at all.
+      ENGINE_SECRET: ${ENGINE_SECRET:?set in .env}
+      SERVED_MODEL_NAME: coder
+      # Long enough that vllm:num_requests_running is observably non-zero, so
+      # gpu-down.sh's drain loop has something real to wait on.
+      MOCK_LATENCY: "0.4"
+    command: ["python", "-u", "/app/mock_engine.py"]
+    # No published ports: the gateway reaches it over the compose network, the
+    # same shape as reaching the real engine over the tailnet. Nothing on the
+    # laptop's LAN can see it.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/__mock__',timeout=3).status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  litellm:
+    depends_on:
+      litellm-db:
+        condition: service_healthy
+      mock-engine:
+        condition: service_healthy
+    environment:
+      # The one and only override. Service name, not localhost — same reason the
+      # real value must be the MagicDNS name and not localhost.
+      ENGINE_API_BASE: http://mock-engine:8000/v1

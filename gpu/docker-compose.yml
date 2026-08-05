@@ -1,0 +1,96 @@
+# vLLM on the rented GPU node. Run by provision.sh, on the node itself.
+#
+# NETWORKING — read this before "fixing" it.
+#
+# There is no `ports:` stanza, and there must never be one: publishing a port
+# on this host would put :8000 on the rented machine's public interface.
+# `network_mode: host` is what lets the gateway reach it anyway — the container
+# shares the host's network namespace, so vLLM binds the host's tailscale0
+# address directly with no NAT and no published port.
+#
+# VLLM_BIND_HOST is set by provision.sh to the node's *tailnet* address
+# (100.x.y.z), not 0.0.0.0. So even with all-inbound denied at the cloud
+# firewall, the socket itself only exists on the tailnet. Two independent
+# controls, which is the point.
+name: ai-infra-gpu
+
+services:
+  vllm:
+    # vllm/vllm-openai:v0.26.0 as of 2026-08-05. Gated DeltaNet support is
+    # recent, so >= 0.19.0 is a hard floor, not a preference.
+    image: vllm/vllm-openai@sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b
+    container_name: ai-infra-vllm
+    restart: unless-stopped
+    network_mode: host
+    # TP=1 needs no shared-memory segment between workers. If a second GPU is
+    # ever added, uncomment this the SAME DAY — without it multi-GPU startup
+    # fails with a cryptic NCCL error.
+    # ipc: host
+    volumes:
+      # The persistent network volume, mounted at the HF cache path so
+      # start/stop does not re-download 35 GB. Bills 24/7 regardless of whether
+      # the pod exists.
+      - ${HF_HOME:-/runpod-volume}:/root/.cache/huggingface
+    environment:
+      HF_HUB_ENABLE_HF_TRANSFER: "1"
+      # Only needed above 262k context. We serve 65k, so it is deliberately unset.
+      # VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command:
+      - --model=${MODEL_ID:?}
+      - --revision=${MODEL_REVISION:?}          # byte-identical weights on every rebuild
+      - --served-model-name=coder
+      - --host=${VLLM_BIND_HOST:?}              # tailnet address only — never 0.0.0.0
+      - --port=8000
+      - --tensor-parallel-size=${TP:-1}
+      - --max-model-len=${MAX_MODEL_LEN:-65536}
+      - --gpu-memory-utilization=0.90            # fraction of the WHOLE card, not of what remains
+      - --api-key=${ENGINE_SECRET:?}             # defence in depth; the ACL is the real control
+      - --disable-log-requests                   # no prompts on disk, on hardware we do not own
+      - --enable-auto-tool-choice
+      # qwen3_coder, NOT hermes. A wrong parser returns prose where agents
+      # expect tool_calls and fails SILENTLY — aider will not surface it
+      # because it uses text diffs; opencode and Claude Code will.
+      - --tool-call-parser=qwen3_coder
+      # Required even on the non-thinking alias. Without it reasoning text
+      # lands inside `content`.
+      - --reasoning-parser=qwen3
+      # If CUDA graph capture fails, this is the knob — the default (512) can
+      # exceed the Mamba cache size on this architecture.
+      # - --max-cudagraph-capture-size=256
+      #
+      # NOTE — this checkpoint is easily assumed to be text-only. It is not, and so
+      # is every other Qwen3.6 candidate including the 27B A/B: all are
+      # ...ForConditionalGeneration with a vision_config, image_token_id and
+      # video_token_id. There is no text-only variant in this family, so this is
+      # not a reason to change models — do not go looking for a swap.
+      #
+      # The text tower is unaffected (40 layers, 2 KV heads, head_dim 256,
+      # 1-in-4 full attention — the ~20 KB/token sizing in §2 holds). The vision
+      # tower is ~0.4B params, ~0.9 GB unquantized, which is noise against
+      # 43.2 GB. The part worth measuring is vLLM's multimodal profiling
+      # reservation: it profiles with a dummy image at max resolution, which can
+      # reserve more than the tower weights and lands against KV cache.
+      # Measure peak VRAM on first boot; if the reservation is material, cap it:
+      # - --limit-mm-per-prompt={"image":0,"video":0}
+      # Verify the chat template still applies cleanly when you do — a
+      # zero-limit can interact badly with a multimodal template.
+      #
+      # --enable-prefix-caching is high value here (agents repeat long system
+      # prompts and file context) but Mamba-cache prefix caching is documented
+      # as experimental on this architecture. Left off deliberately; enable it
+      # later as a discrete, separately-verified change.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H \"Authorization: Bearer $${ENGINE_SECRET}\" http://127.0.0.1:8000/v1/models >/dev/null"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      # Weights load from the volume into VRAM on every start. Minutes, not
+      # seconds — a short start_period would mark a healthy engine as failed.
+      start_period: 900s

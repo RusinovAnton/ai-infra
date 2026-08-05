@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+backups/
+*.dump
+*.dump.age
+*.dump.gpg
+
+# Byproducts of running/validating the Python helpers locally.
+__pycache__/
+*.pyc

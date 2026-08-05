@@ -1,0 +1,59 @@
+// Tailnet policy for the ai-infra deployment.
+//
+// Source of truth. Apply via the GitOps action in .github/workflows/, never by
+// editing the admin console — a console edit leaves no trail in this repo and
+// will be silently reverted by the next push.
+//
+// The whole policy lives in `grants`. There is deliberately NO `acls` block:
+// a default allow-all `grants` entry silently overrides `acls` restrictions
+// with no warning, and new tailnets ship exactly that.
+{
+	"tagOwners": {
+		"tag:gateway": ["autogroup:admin"],
+		"tag:gpu":     ["autogroup:admin"],
+	},
+
+	"groups": {
+		// Replace with real logins before applying. One entry per teammate.
+		"group:devs": ["you@example.com"],
+	},
+
+	"grants": [
+		// Users: the gateway's HTTPS port only. Never the GPU node.
+		{ "src": ["group:devs"],   "dst": ["tag:gateway"], "ip": ["tcp:443"] },
+
+		// The gateway is the ONLY thing that may reach the engine.
+		{ "src": ["tag:gateway"],  "dst": ["tag:gpu"],     "ip": ["tcp:8000"] },
+
+		// Admin access, over the tailnet. Ports differ per node: the gateway
+		// serves 443, the GPU node serves the engine. Do not grant ports that
+		// nothing listens on — this policy's value is that it reads truthfully.
+		{ "src": ["autogroup:admin"], "dst": ["tag:gateway"], "ip": ["tcp:22","tcp:443"] },
+		{ "src": ["autogroup:admin"], "dst": ["tag:gpu"],     "ip": ["tcp:22","tcp:8000"] },
+
+		// Each member reaches their own devices only — no cross-user access.
+		{ "src": ["autogroup:member"], "dst": ["autogroup:self"], "ip": ["*"] },
+
+		// NOTE: there is deliberately no grant with src tag:gpu. grants is
+		// default-deny, so the rented node cannot initiate to anything on the
+		// tailnet. That is load-bearing — the rented node is untrusted
+		// hardware that now sits inside the perimeter. Absence is easy to
+		// erase by accident, which is why the third test below asserts it.
+	],
+
+	"tests": [
+		// A normal user: gateway only.
+		{ "src": "you@example.com",
+		  "accept": ["tag:gateway:443"],
+		  "deny":   ["tag:gpu:8000", "tag:gateway:22"] },
+
+		// The gateway can reach the engine.
+		{ "src": "tag:gateway",
+		  "accept": ["tag:gpu:8000"],
+		  "deny":   ["tag:gateway:22"] },
+
+		// The rented node can reach NOTHING. This is the blast-radius assertion.
+		{ "src": "tag:gpu",
+		  "deny":   ["tag:gateway:443", "tag:gateway:22", "tag:gateway:4000"] },
+	],
+}

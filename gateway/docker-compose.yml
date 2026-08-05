@@ -1,0 +1,73 @@
+# Office gateway: LiteLLM + Postgres.
+#
+# The project name and volume are deliberately explicit rather than derived from
+# the directory name, so a second stack on the same host cannot silently share
+# this database.
+#
+# Images are pinned to digests. `main-stable` / `17` are recorded in the
+# comments so a future reader knows what the digest was, and can re-pin
+# intentionally rather than by drifting.
+name: ai-infra
+
+services:
+  litellm:
+    # ghcr.io/berriai/litellm:main-stable as of 2026-08-05
+    image: ghcr.io/berriai/litellm@sha256:af806882b7a6ced41658db5b6a7e98ed7b9b51d03b935e0417bf1c8552d688af
+    container_name: ai-infra-litellm
+    restart: unless-stopped
+    depends_on:
+      litellm-db:
+        # LiteLLM crashes on boot if Postgres is not yet accepting connections;
+        # `depends_on: [litellm-db]` alone only waits for the container to start.
+        condition: service_healthy
+    # Loopback only. Exposure to teammates comes from `tailscale serve`, which
+    # also injects the Tailscale-User-Login header that attribution relies on.
+    # Binding 0.0.0.0 here would put :4000 on the office LAN and would make
+    # that header spoofable.
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./error_hook.py:/app/error_hook.py:ro
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set in .env}
+      DATABASE_URL: postgresql://litellm:${LITELLM_DB_PASS:?set in .env}@litellm-db:5432/litellm
+      # The engine's --api-key. Defence in depth; the tailnet ACL is the real
+      # control. Rotated on every gpu-up (see scripts/gpu-up.sh).
+      ENGINE_SECRET: ${ENGINE_SECRET:?set in .env}
+      # MagicDNS name of the GPU node, e.g. http://gpu.tailnet-name.ts.net:8000/v1
+      ENGINE_API_BASE: ${ENGINE_API_BASE:?set in .env}
+      UI_USERNAME: ${UI_USERNAME:?set in .env}
+      UI_PASSWORD: ${UI_PASSWORD:?set in .env}
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    healthcheck:
+      # /health/liveliness answers from the gateway alone and says nothing
+      # about the engine — that is exactly what a container healthcheck should
+      # assert. Engine liveness is monitored separately.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness',timeout=5).status==200 else 1)\""]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  litellm-db:
+    # postgres:17 as of 2026-08-05
+    image: postgres@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
+    container_name: ai-infra-db
+    restart: unless-stopped
+    # No published ports. Every virtual key and all spend history lives here;
+    # nothing outside this compose network needs to reach it.
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${LITELLM_DB_PASS:?set in .env}
+      POSTGRES_DB: litellm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata:

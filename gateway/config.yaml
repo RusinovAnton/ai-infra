@@ -1,0 +1,62 @@
+# Two aliases, one engine. Same weights, so switching tiers costs nothing and
+# needs no reload — the only difference is the thinking toggle.
+model_list:
+  # Default agentic coding: opencode, Claude Code, aider.
+  - model_name: coder
+    litellm_params:
+      model: openai/coder
+      api_base: os.environ/ENGINE_API_BASE
+      api_key: os.environ/ENGINE_SECRET
+      # Purely a cost guard. vLLM batches continuously, so a runaway request no
+      # longer blocks everyone behind it the way Ollama's single slot did — but
+      # an uncapped client still burns GPU hours.
+      max_tokens: 8192
+      extra_body:
+        chat_template_kwargs: {enable_thinking: false}
+
+  # Architecture, hard debugging, tricky refactors.
+  - model_name: coder-max
+    litellm_params:
+      model: openai/coder
+      api_base: os.environ/ENGINE_API_BASE
+      api_key: os.environ/ENGINE_SECRET
+      # Thinking on. Cap is generous because a cap that cuts mid-reasoning
+      # returns finish_reason: length with EMPTY content — a request that
+      # burned GPU time and produced nothing, presenting as a broken model.
+      max_tokens: 32768
+      extra_body:
+        chat_template_kwargs: {enable_thinking: true}
+
+router_settings:
+  routing_strategy: simple-shuffle    # one deployment per alias; nothing to balance
+  num_retries: 2
+  timeout: 600                        # a thinking alias on a long task is slow, not hung
+  allowed_fails: 3
+  cooldown_time: 60
+  # Thinking tier degrades to the non-thinking alias rather than erroring.
+  # There is no fallback out of `coder` — it is the floor, and with one engine
+  # there is nowhere else to go. This covers a thinking-path failure and
+  # nothing else: if the node is down, both aliases are down. That case is
+  # handled by error_hook.py, not by a fallback.
+  fallbacks:
+    - {"coder-max": ["coder"]}
+
+litellm_settings:
+  # Spend records yes, prompt content no. Pairs with --disable-log-requests on
+  # the engine: prompts then exist only in RAM, on both machines.
+  #
+  # NOT disable_spend_logs — they sound similar and do opposite things. The
+  # spend rows are what scripts/idle-check.sh queries to decide the GPU is idle.
+  turn_off_message_logging: true
+  # Turns an unreachable engine into a 503 that names the cause and the fix,
+  # instead of a bare 500 that reads like a bug in the gateway.
+  callbacks: error_hook.proxy_handler_instance
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  # Makes /health cheap enough to poll — without it every probe hits the engine.
+  background_health_checks: true
+  health_check_interval: 60
+  # Do not expose engine URLs or raw upstream errors on /health to key holders.
+  health_check_details: false
