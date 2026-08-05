@@ -11,11 +11,20 @@
 	"tagOwners": {
 		"tag:gateway": ["autogroup:admin"],
 		"tag:gpu":     ["autogroup:admin"],
+
+		// TRANSITIONAL — remove once no device advertises tag:testbed.
+		// A tag must exist here before a device can advertise it, and a live
+		// device should never hold a tag this file does not define. So the
+		// retag is two saves: keep this line, move the device to tag:gateway,
+		// then delete this line in a second push.
+		"tag:testbed": ["autogroup:admin"],
 	},
 
 	"groups": {
-		// Replace with real logins before applying. One entry per teammate.
-		"group:devs": ["you@example.com"],
+		// One entry per teammate. Must be the exact login string from the
+		// admin console's Users page — a login Tailscale does not recognise
+		// fails validation.
+		"group:devs": ["hello.rusinov@gmail.com"],
 	},
 
 	"grants": [
@@ -43,9 +52,19 @@
 
 	"tests": [
 		// A normal user: gateway only.
-		{ "src": "you@example.com",
-		  "accept": ["tag:gateway:443"],
-		  "deny":   ["tag:gpu:8000", "tag:gateway:22"] },
+		//
+		// The `deny` half is deliberately absent, not forgotten. This login is a
+		// tailnet owner, so it also matches autogroup:admin — which legitimately
+		// grants tag:gateway:22 and tag:gpu:8000. Asserting a denial the admin
+		// grants contradict does not test the dev-facing policy; it just fails
+		// validation. Only a NON-admin login can prove those rules, so restore
+		// the commented test below as soon as a teammate exists.
+		{ "src": "hello.rusinov@gmail.com",
+		  "accept": ["tag:gateway:443"] },
+
+		// { "src": "teammate@example.com",
+		//   "accept": ["tag:gateway:443"],
+		//   "deny":   ["tag:gpu:8000", "tag:gateway:22"] },
 
 		// The gateway can reach the engine.
 		{ "src": "tag:gateway",

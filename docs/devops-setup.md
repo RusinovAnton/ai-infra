@@ -79,11 +79,53 @@ brew services stop ollama
 
 Full detail in [tailnet-admin.md](tailnet-admin.md). The minimum to get moving:
 
-1. Admin console → **DNS** → note the tailnet name (`tail9a2b1.ts.net`), enable
-   **MagicDNS**, enable **HTTPS Certificates**.
-2. Edit `policy/tailnet-policy.hujson` — replace `you@example.com` in **both**
-   `groups` and `tests` with the exact login string from the **Users** page. A
-   login Tailscale doesn't recognise fails validation.
+1. Admin console → **DNS** → read the tailnet name (looks like `tail9a2b1.ts.net`),
+   enable **MagicDNS**, enable **HTTPS Certificates**.
+
+   This value is `<TAILNET>` throughout these docs. It is **not** a variable
+   anywhere in the repo — substitute it by hand. It lands in real configuration in
+   exactly one place, `ENGINE_API_BASE` in `gateway/.env` ([§4](#4-gpu-node)); every
+   other occurrence is a URL you type into `curl` or an editor's settings. No need
+   to write it down — from any joined machine:
+
+   ```bash
+   tailscale status --json | jq -r .MagicDNSSuffix
+   ```
+
+   Use the **full** name in URLs. MagicDNS makes the bare hostname `gateway`
+   resolve, but the HTTPS certificate is issued for the FQDN, so
+   `https://gateway/...` fails certificate validation while
+   `https://gateway.<TAILNET>.ts.net/...` succeeds.
+
+   ⚠️ **Name the node before it ever gets a certificate.** Enabling **HTTPS
+   Certificates** publishes nothing on its own — Tailscale issues a cert only when
+   `tailscale serve` or `tailscale cert` first runs on a node, and *that* is what
+   writes the node's exact FQDN into a public Certificate Transparency log,
+   permanently and unremovably. Serve from a machine still called
+   `someones-laptop` and that name is public forever; renaming afterwards does not
+   retract it. Set `--hostname` first ([§3](#3-gateway-node-on-the-tailnet)), then
+   serve. The tailnet suffix itself is already an obfuscated string rather than
+   your organisation's name, so a generic node name leaks nothing useful — and a
+   node name is not access: the tailnet stays default-deny with no public ingress.
+2. Edit `policy/tailnet-policy.hujson` — put your exact login string from the
+   **Users** page into `groups`. A login Tailscale doesn't recognise fails
+   validation. From any joined machine:
+
+   ```bash
+   tailscale status --json | jq -r '.User[].LoginName' | grep -v '\.ts\.net$'
+   ```
+
+   The `grep` drops tagged devices, which appear in that map under a synthetic
+   `<host>.<tailnet>.ts.net` login rather than a human one.
+
+   ⚠️ **Do not paste that same login into the `tests` block's `deny` list.** If
+   you are a tailnet owner or admin you also match `autogroup:admin`, which
+   legitimately grants you `tag:gateway:22` and `tag:gpu:8000` — so a test
+   asserting you are denied them fails validation, and the failure is confusing
+   because the policy is correct and the test is wrong. Only a **non-admin**
+   login can prove the dev-facing rules. The file ships the strong version
+   commented out for when a teammate exists; see
+   [tailnet-admin.md](tailnet-admin.md#verifying-the-policy-honestly).
 3. Invite teammates (**Users → Invite**), then add them to `group:devs`.
 4. Paste the file into **Access Controls** → Save. All three `tests` must pass.
 5. Wire GitOps so the console stops being the source of truth — see
