@@ -20,16 +20,24 @@
 		"tag:testbed": ["autogroup:admin"],
 	},
 
-	"groups": {
-		// One entry per teammate. Must be the exact login string from the
-		// admin console's Users page — a login Tailscale does not recognise
-		// fails validation.
-		"group:devs": ["hello.rusinov@gmail.com"],
-	},
+	// There is deliberately NO `groups` block, so this file contains no
+	// personal identities and never needs to. Membership of the tailnet is
+	// the developer roster: you only become a member by being invited, and
+	// `autogroup:member` excludes tagged nodes, so the rented GPU box can
+	// never match a developer rule.
+	//
+	// Reachability is not authorization. Reaching :443 gets you a 401 — the
+	// LiteLLM virtual key is what grants use, and it is issued and revoked
+	// per person on the gateway. Adding a login here would duplicate that
+	// roster in a second place, in git, forever.
+	//
+	// If you ever need a member who is NOT a developer, that is the point to
+	// introduce `group:devs` — and to accept teammates' logins living in this
+	// repo's history.
 
 	"grants": [
-		// Users: the gateway's HTTPS port only. Never the GPU node.
-		{ "src": ["group:devs"],   "dst": ["tag:gateway"], "ip": ["tcp:443"] },
+		// Members: the gateway's HTTPS port only. Never the GPU node.
+		{ "src": ["autogroup:member"], "dst": ["tag:gateway"], "ip": ["tcp:443"] },
 
 		// The gateway is the ONLY thing that may reach the engine.
 		{ "src": ["tag:gateway"],  "dst": ["tag:gpu"],     "ip": ["tcp:8000"] },
@@ -47,24 +55,19 @@
 		// default-deny, so the rented node cannot initiate to anything on the
 		// tailnet. That is load-bearing — the rented node is untrusted
 		// hardware that now sits inside the perimeter. Absence is easy to
-		// erase by accident, which is why the third test below asserts it.
+		// erase by accident, which is why the last test below asserts it.
 	],
 
 	"tests": [
-		// A normal user: gateway only.
+		// There is no user-facing test here, and that is a real gap rather than an
+		// oversight. A `tests` entry needs a concrete src — a login or a tag — so
+		// any dev-facing assertion means committing somebody's identity to this
+		// repo permanently. The two tag-based tests below carry the load-bearing
+		// claims; verify the dev path interactively against a real non-admin
+		// account instead (tailnet-admin.md#verifying-the-policy-honestly).
 		//
-		// The `deny` half is deliberately absent, not forgotten. This login is a
-		// tailnet owner, so it also matches autogroup:admin — which legitimately
-		// grants tag:gateway:22 and tag:gpu:8000. Asserting a denial the admin
-		// grants contradict does not test the dev-facing policy; it just fails
-		// validation. Only a NON-admin login can prove those rules, so restore
-		// the commented test below as soon as a teammate exists.
-		{ "src": "hello.rusinov@gmail.com",
-		  "accept": ["tag:gateway:443"] },
-
-		// { "src": "teammate@example.com",
-		//   "accept": ["tag:gateway:443"],
-		//   "deny":   ["tag:gpu:8000", "tag:gateway:22"] },
+		// Never use your own admin login for that check: it matches
+		// autogroup:admin and passes for the wrong reason.
 
 		// The gateway can reach the engine.
 		{ "src": "tag:gateway",

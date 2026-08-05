@@ -72,30 +72,31 @@ nobody will notice the removal of.
 
 ### Add a developer
 
-1. Admin console → **Users** → **Invite external users**. They accept and appear
-   with an exact login string — copy it verbatim. A login Tailscale doesn't
-   recognise **fails policy validation**, and the failure mode differs by how the
-   tailnet was created: Google SSO gives `alice@example.com`, GitHub gives
-   `alice@github`.
-2. Add that string to `group:devs` in the policy. PR, merge.
-3. They install Tailscale and log in. If **device approval** is on, approve their
+1. Admin console → **Users** → **Invite external users**.
+2. They install Tailscale and log in. If **device approval** is on, approve their
    machine under **Machines** — until then it looks joined and reaches nothing.
-4. Issue them a gateway key:
+3. Issue them a gateway key:
    [gateway-admin.md](gateway-admin.md#issue-a-key).
-5. Send them [developer-guide.md](developer-guide.md).
+4. Send them [developer-guide.md](developer-guide.md).
+
+**No policy change is needed.** The grant is `autogroup:member`, so accepting the
+invitation is what grants tailnet reachability to the gateway's `:443` — and that
+alone gets them a `401`. Step 3 is the step that actually grants use. Two rosters
+in two places drift; this deployment keeps one, on the gateway.
 
 ### Remove a developer
 
-Do all four, in this order — the first two are the ones that actually stop access:
+In this order — the first two are the ones that actually stop access:
 
 1. Revoke their **virtual key** on the gateway
    ([gateway-admin.md](gateway-admin.md#revoke-a-key)).
-2. Admin console → **Users** → remove the user. This deauthorizes their devices.
-3. Remove them from `group:devs` in the policy. PR, merge.
-4. Check their key's spend log for anything unexpected in the final days.
+2. Admin console → **Users** → remove the user. This deauthorizes their devices
+   and, since the grant is `autogroup:member`, is also what removes their network
+   access. There is no third place to edit.
+3. Check their key's spend log for anything unexpected in the final days.
 
-Removing them from `group:devs` alone leaves a working key on a machine that is
-still on the tailnet until step 2 lands.
+Doing step 2 without step 1 leaves a live key that works the moment they reach
+the tailnet by any other route. Do step 1 first.
 
 ### Add an admin machine
 
@@ -155,7 +156,7 @@ A `401` here is a **failure of the test**: it means the ACL let you through and
 only the engine's API key stopped you. The network layer is supposed to refuse
 the connection before any HTTP happens.
 
-Re-run this after every policy change that touches `group:devs` or the grants.
+Re-run this after every change to the grants.
 
 ---
 
@@ -267,7 +268,8 @@ the GPU node, destroy and recreate the pod.
 `tailscale serve` isn't running on the gateway. `tailscale serve status`.
 
 **A dev gets a connection timeout.** Either they're not on the tailnet, their
-device is unapproved, or they're not in `group:devs`. In that order.
+device is unapproved, or their device is *tagged* — a tagged device has no user
+identity, so `autogroup:member` never matches it. In that order.
 
 **A dev gets `401` from the gateway.** Network is fine, their virtual key is
 wrong or revoked → [gateway-admin.md](gateway-admin.md).

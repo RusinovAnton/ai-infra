@@ -107,27 +107,26 @@ Full detail in [tailnet-admin.md](tailnet-admin.md). The minimum to get moving:
    serve. The tailnet suffix itself is already an obfuscated string rather than
    your organisation's name, so a generic node name leaks nothing useful — and a
    node name is not access: the tailnet stays default-deny with no public ingress.
-2. Edit `policy/tailnet-policy.hujson` — put your exact login string from the
-   **Users** page into `groups`. A login Tailscale doesn't recognise fails
-   validation. From any joined machine:
+2. `policy/tailnet-policy.hujson` needs **no editing** — it contains no logins and
+   is not meant to. The dev grant is `autogroup:member`, so tailnet membership is
+   the roster. Two consequences worth understanding before you rely on it:
 
-   ```bash
-   tailscale status --json | jq -r '.User[].LoginName' | grep -v '\.ts\.net$'
-   ```
+   - Inviting somebody grants them reachability to the gateway's `:443`, and
+     nothing more. Reachability is not authorization — they get a `401` until you
+     issue a virtual key, and that key is the per-person control you revoke.
+   - `autogroup:member` excludes tagged devices, so the rented GPU node can never
+     match a developer rule, and a *tagged* developer laptop silently stops
+     matching one. That last case looks exactly like a firewall bug.
 
-   The `grep` drops tagged devices, which appear in that map under a synthetic
-   `<host>.<tailnet>.ts.net` login rather than a human one.
-
-   ⚠️ **Do not paste that same login into the `tests` block's `deny` list.** If
-   you are a tailnet owner or admin you also match `autogroup:admin`, which
-   legitimately grants you `tag:gateway:22` and `tag:gpu:8000` — so a test
-   asserting you are denied them fails validation, and the failure is confusing
-   because the policy is correct and the test is wrong. Only a **non-admin**
-   login can prove the dev-facing rules. The file ships the strong version
-   commented out for when a teammate exists; see
-   [tailnet-admin.md](tailnet-admin.md#verifying-the-policy-honestly).
-3. Invite teammates (**Users → Invite**), then add them to `group:devs`.
-4. Paste the file into **Access Controls** → Save. All three `tests` must pass.
+   ⚠️ **Do not add your own login to `tests`.** If you are a tailnet owner or
+   admin you also match `autogroup:admin`, which legitimately grants you
+   `tag:gateway:22` and `tag:gpu:8000` — so a test asserting you are denied them
+   fails validation while the policy is entirely correct. A `tests` entry needs a
+   concrete src, so there is no way to assert the dev path without committing
+   somebody's identity; verify it interactively instead, from a non-admin account
+   ([tailnet-admin.md](tailnet-admin.md#verifying-the-policy-honestly)).
+3. Invite teammates (**Users → Invite**). No policy change accompanies this.
+4. Paste the file into **Access Controls** → Save. Both `tests` must pass.
 5. Wire GitOps so the console stops being the source of truth — see
    [tailnet-admin.md](tailnet-admin.md#policy-as-code).
 

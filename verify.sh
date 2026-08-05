@@ -163,8 +163,24 @@ if grep -E '"src"\s*:\s*\[\s*"tag:gpu"' "$P" | grep -v '^\s*//' | grep -q .; the
 else
   ok "no src tag:gpu grant — rented node cannot initiate to the tailnet"
 fi
-grep -q 'tag:gpu:8000' "$P" && ok "policy asserts tag:gpu egress denial in tests" \
-                            || bad "tests do not assert tag:gpu confinement"
+# Must be a LIVE test asserting tag:gpu is denied outbound — not a commented-out
+# one, and not tag:gateway's accept of tag:gpu:8000, which is the opposite claim.
+# Checked on the parsed document so a comment cannot satisfy it.
+if python3 - "$P" <<'PY'
+import json, re, sys
+s = re.sub(r'//.*', '', open(sys.argv[1]).read())
+s = re.sub(r',(\s*[}\]])', r'\1', s)
+d = json.loads(s)
+sys.exit(0 if any(
+    t.get("src") == "tag:gpu" and t.get("deny") and not t.get("accept")
+    for t in d.get("tests", [])
+) else 1)
+PY
+then
+  ok "a live test asserts tag:gpu is denied outbound (rented node confined)"
+else
+  bad "no live tests entry with src tag:gpu and a deny list — confinement is unasserted"
+fi
 if command -v tailscale >/dev/null && tailscale status >/dev/null 2>&1; then
   skip "tailscale debug netmap: only tag:gateway permitted to 8000"
 else
