@@ -10,7 +10,13 @@ name: Sync Tailscale policy
 #
 # Requires two repo secrets:
 #   TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET  — OAuth client with the
-#   `policy_file` write scope (admin console -> Settings -> OAuth clients).
+#   `policy_file` write scope. In the current console that lives under
+#   Settings -> Trust credentials, not "OAuth clients".
+#
+# `tailnet: "-"` is required, not optional. Left unset the action sends an empty
+# tailnet and the API answers 404 `tailnet "acl" not found`, which reads like a
+# missing policy file rather than a missing parameter. "-" means "the default
+# tailnet of these credentials", which avoids naming the tailnet in this file.
 
 on:
   push:
@@ -36,6 +42,7 @@ jobs:
         with:
           action: test
           policy-file: ./policy/tailnet-policy.hujson
+          tailnet: '-'
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
 
@@ -45,5 +52,6 @@ jobs:
         with:
           action: apply
           policy-file: ./policy/tailnet-policy.hujson
+          tailnet: '-'
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}

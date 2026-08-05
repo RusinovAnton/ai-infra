@@ -34,8 +34,10 @@ by `.github/workflows/tailscale-policy.yml` — tests on PR, applies on push to
 
 **One-time setup:**
 
-1. Admin console → **Settings** → **OAuth clients** → Generate. Scope:
-   `policy_file` **write**. No tag is needed for that scope.
+1. Admin console → **Settings** → **Trust credentials** → Generate an OAuth
+   client. Scope: `policy_file` **write**. No tag is needed for that scope.
+   (Older docs call this page *OAuth clients*; the direct link is
+   `/admin/settings/trust-credentials`.)
 2. Add the credentials as repo secrets:
 
 ```bash
