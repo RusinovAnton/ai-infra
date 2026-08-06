@@ -11,3 +11,4 @@ backups/
 # Byproducts of running/validating the Python helpers locally.
 __pycache__/
 *.pyc
+bench/results/

@@ -10,6 +10,10 @@
 #       the design's exit criterion: on ONE GPU, TTFT p95 < ~5 s at 5
 #       concurrent file-sized streams with zero sustained preemptions
 #       -> steady state stays 1 GPU
+#   TASKS=1 ./scripts/bench.sh coder coder-max
+#       run the committed task corpus (bench/tasks/*.md) instead of the
+#       synthetic prompt; full outputs land in bench/results/<ts>/ for
+#       scoring against each task's rubric. TASK=<name> runs one fixture.
 #
 # Streaming, because agents stream. TTFT is to the first CONTENT token — on the
 # thinking tier that includes the whole reasoning pass, because the user waits
@@ -25,6 +29,10 @@ export RUNS="${RUNS:-3}"
 export MAXTOK="${MAXTOK:-512}"
 export STREAMS="${STREAMS:-1}"
 export FILE_PROMPT="${FILE_PROMPT:-0}"
+export TASKS="${TASKS:-0}"
+export TASK="${TASK:-}"
+export TASKS_DIR="$REPO_ROOT/bench/tasks"
+export RESULTS_DIR="$REPO_ROOT/bench/results/$(date -u +%Y%m%dT%H%M%SZ)"
 ENGINE_METRICS="$(engine_base)/metrics"
 export ENGINE_METRICS
 export ENGINE_SECRET="${ENGINE_SECRET:-}"
@@ -94,6 +102,40 @@ def one_stream(_):
     comp = (usage or {}).get("completion_tokens") or 0
     decode = comp / (total - first_any) if first_any and total > first_any else float("nan")
     return ttft, first_any, comp, decode, total
+
+if os.environ.get("TASKS") == "1":
+    # Corpus mode: one request per fixture, single stream, full output saved.
+    # Metrics still print, but the artefact that matters is the response file —
+    # scoring happens against the rubric, by a human, later.
+    import glob, pathlib
+    outdir = pathlib.Path(os.environ["RESULTS_DIR"]); outdir.mkdir(parents=True, exist_ok=True)
+    only = os.environ.get("TASK", "")
+    fixtures = sorted(glob.glob(os.environ["TASKS_DIR"] + "/[0-9]*.md"))
+    if only:
+        fixtures = [f for f in fixtures if only in f]
+    print(f"── {MODEL}  corpus: {len(fixtures)} task(s) -> {outdir} ──")
+    for fx in fixtures:
+        name = pathlib.Path(fx).stem
+        text = pathlib.Path(fx).read_text()
+        task_prompt = text.split("## Rubric")[0].strip()   # rubric never reaches the model
+        req = urllib.request.Request(BASE + "/v1/chat/completions",
+            headers={"Authorization": "Bearer " + KEY, "Content-Type": "application/json"},
+            data=json.dumps({"model": MODEL,
+                             "messages": [{"role": "user", "content": task_prompt}],
+                             "max_tokens": 8192}).encode())
+        t0 = time.monotonic()
+        d = json.load(urllib.request.urlopen(req, timeout=600))
+        total = time.monotonic() - t0
+        msg = d["choices"][0]["message"]
+        usage = d.get("usage", {})
+        out = outdir / f"{name}--{MODEL}.md"
+        out.write_text(
+            f"# {name} — {MODEL}\n\n"
+            f"tokens={usage.get('completion_tokens')} total={total:.1f}s "
+            f"finish={d['choices'][0].get('finish_reason')}\n\n---\n\n"
+            + (msg.get("content") or "(EMPTY)"))
+        print(f"  {name}: {usage.get('completion_tokens')} tok in {total:.1f}s -> {out.name}")
+    raise SystemExit
 
 print(f"── {MODEL}  streams={STREAMS} ──")
 p0 = preemptions()
