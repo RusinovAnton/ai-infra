@@ -38,9 +38,9 @@ esac
 
 IDLE_MINUTES="${IDLE_MINUTES:-45}"
 
-pod_id="$(find_pod_id || true)"
-if [ -z "$pod_id" ]; then
-  log "no pod running — nothing to do"
+node_id="$(provider_find || true)"
+if [ -z "$node_id" ]; then
+  log "no node running — nothing to do"
   exit 0
 fi
 

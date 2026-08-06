@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Drain, then destroy the inference node. The volume persists.
+# Drain, then bring the inference node down.
 #
-#   ./gpu-down.sh            drain up to 120 s, then terminate
-#   ./gpu-down.sh --force    terminate now, dropping in-flight requests
+#   ./gpu-down.sh            drain up to 120 s, then stop
+#   ./gpu-down.sh --force    stop now, dropping in-flight requests
 #   ./gpu-down.sh --dry-run  report what it would do
+#
+# What "down" MEANS is the provider's decision, and the difference is the point:
+# an ephemeral rented node is destroyed, because a stopped one still bills. A
+# machine you own is only stopped — nothing here can destroy hardware.
 #
 # Draining matters because a coder-max request can legitimately run for minutes.
 # Killing mid-generation presents to the user as a flaky gateway, not as a
@@ -22,17 +26,18 @@ esac
 
 DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-120}"
 
-pod_id="$(find_pod_id || true)"
-if [ -z "$pod_id" ]; then
-  log "no pod named $POD_NAME — nothing to do (the volume still bills)"
+node_id="$(provider_find || true)"
+if [ -z "$node_id" ]; then
+  log "no node named $NODE_NAME — nothing to do${PROVIDER_BILLS_IDLE:+ ($PROVIDER_BILLS_IDLE)}"
   exit 0
 fi
-log "found pod $pod_id"
+log "found node $node_id (provider=$GPU_PROVIDER, kind=$PROVIDER_KIND)"
 
 if [ "$DRY" = 1 ]; then
   running="$(curl -fsS -m 10 "$(engine_base)/metrics" 2>/dev/null \
     | awk '/^vllm:num_requests_running/ {print $2}' | head -1)"
-  log "dry run: would drain (in flight: ${running:-unknown}) then terminate $pod_id"
+  if provider_is_ephemeral; then act="destroy"; else act="stop the engine on"; fi
+  log "dry run: would drain (in flight: ${running:-unknown}) then $act $node_id"
   exit 0
 fi
 
@@ -67,17 +72,12 @@ else
   log "--force: skipping drain, in-flight requests will be dropped"
 fi
 
-# ------------------------------------------------------------ terminate
+# ------------------------------------------------------------ down
 
-log "terminating pod $pod_id"
-# DELETE, not /stop. A stopped pod keeps billing its container disk and holds
-# the GPU reservation; the whole point of on-demand is that nothing but the
-# volume survives.
-rp DELETE "/pods/$pod_id" >/dev/null || die "terminate call failed — check the RunPod console before assuming it is down"
+provider_destroy "$node_id"
 
-for _ in $(seq 1 20); do
-  [ -z "$(find_pod_id || true)" ] && { log "pod gone"; break; }
-  sleep 3
-done
-
-log "done. The ephemeral tailnet node removes itself; the weights volume persists (and keeps billing)."
+if provider_is_ephemeral; then
+  log "done. The ephemeral tailnet node removes itself.${PROVIDER_BILLS_IDLE:+ Note: $PROVIDER_BILLS_IDLE.}"
+else
+  log "done. The machine is untouched.${PROVIDER_BILLS_IDLE:+ Note: $PROVIDER_BILLS_IDLE.}"
+fi

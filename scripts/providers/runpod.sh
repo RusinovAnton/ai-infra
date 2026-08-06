@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# GPU_PROVIDER=runpod — rented on-demand pods.
+# shellcheck shell=bash
+#
+# Rented hardware you do not control, billed by the hour, destroyed when idle.
+# The host operator can read VRAM; the tailnet ACL and a short-lived engine
+# secret are what keep the blast radius small. See docs/design-notes.md.
+
+PROVIDER_KIND=ephemeral
+PROVIDER_INJECTS_SECRET=1
+PROVIDER_BILLS_IDLE="the weights volume still bills while no pod exists"
+
+RP="${RUNPOD_API_BASE:-https://rest.runpod.io/v1}"
+
+rp() { # rp METHOD PATH [JSON_BODY]
+  local method="$1" path="$2" body="${3:-}"
+  if [ -n "$body" ]; then
+    curl -sS -m 120 -X "$method" "$RP$path" \
+      -H "Authorization: Bearer $RUNPOD_API_KEY" \
+      -H 'Content-Type: application/json' -d "$body"
+  else
+    curl -sS -m 120 -X "$method" "$RP$path" \
+      -H "Authorization: Bearer $RUNPOD_API_KEY"
+  fi
+}
+
+provider_preflight() {
+  : "${RUNPOD_API_KEY:?set in scripts/.env}"
+  : "${RUNPOD_GPU_TYPE:?set in scripts/.env}"
+  : "${RUNPOD_DATACENTERS:?set in scripts/.env}"
+}
+
+provider_find() {
+  rp GET "/pods" | python3 -c "
+import sys,json
+try: pods=json.load(sys.stdin)
+except Exception: sys.exit(0)
+pods = pods if isinstance(pods,list) else pods.get('data',[]) or pods.get('pods',[])
+for p in pods:
+    if p.get('name')=='$NODE_NAME': print(p['id']); break
+"
+}
+
+provider_status() { # provider_status ID
+  rp GET "/pods/$1" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+v=d.get('desiredStatus')
+print('' if v is None else v)
+" 2>/dev/null || true
+}
+
+provider_storage() {
+  local dc="${RUNPOD_DATACENTERS%%,*}"
+  log "creating a 200 GB network volume in $dc"
+  # Sized for the primary (~35 GB) plus the 27B A/B (~54 GB). Pinned to one
+  # datacenter and billing continuously — see docs/devops-setup.md §4.3 for why
+  # you may not want one at all outside a measurement phase.
+  rp POST /networkvolumes "$(python3 -c "
+import json;print(json.dumps({'name':'ai-infra-weights','dataCenterId':'$dc','size':200}))")" \
+    | python3 -m json.tool
+  log "put the returned id in scripts/.env as RUNPOD_VOLUME_ID"
+}
+
+provider_create() {
+  : "${RUNPOD_VOLUME_ID:?set in scripts/.env — run ./gpu-up.sh --create-storage first}"
+  : "${TS_AUTHKEY:?set in scripts/.env}"
+
+  # provision.sh travels in the pod's env, base64-encoded, so the node is built
+  # from what is in Git rather than from a provider template that can drift.
+  local provision_b64 body
+  provision_b64="$(base64 < "$REPO_ROOT/gpu/provision.sh" | tr -d '\n')"
+
+  body="$(PROVISION_B64="$provision_b64" python3 -c "
+import json, os
+env = {
+    'PROVISION_B64':  os.environ['PROVISION_B64'],
+    'TS_AUTHKEY':     os.environ['TS_AUTHKEY'],
+    'TS_HOSTNAME':    os.environ.get('TS_HOSTNAME','gpu'),
+    'ENGINE_SECRET':  os.environ['ENGINE_SECRET'],
+    'MODEL_ID':       os.environ['MODEL_ID'],
+    'MODEL_REVISION': os.environ['MODEL_REVISION'],
+    'MAX_MODEL_LEN':  os.environ.get('MAX_MODEL_LEN','65536'),
+    'TP':             os.environ.get('TP','1'),
+    'HF_HOME_HOST':   '/runpod-volume',
+}
+print(json.dumps({
+    'name':               os.environ['NODE_NAME'],
+    # SECURE, never COMMUNITY. The names are near-identical and the trust models
+    # are opposite: on Community Cloud the host has root on your machine.
+    'cloudType':          'SECURE',
+    'computeType':        'GPU',
+    'gpuTypeIds':         [os.environ['RUNPOD_GPU_TYPE']],
+    'gpuTypePriority':    'custom',
+    'gpuCount':           int(os.environ.get('GPU_COUNT','1')),
+    'dataCenterIds':      os.environ['RUNPOD_DATACENTERS'].split(','),
+    'dataCenterPriority': 'custom',
+    'networkVolumeId':    os.environ['RUNPOD_VOLUME_ID'],
+    'volumeMountPath':    '/runpod-volume',
+    'containerDiskInGb':  60,
+    'imageName':          os.environ['ENGINE_IMAGE'],
+    # No published ports and no public IP. Reachability comes from the tailnet
+    # only; the engine socket does not exist on any public interface.
+    'ports':              [],
+    'supportPublicIp':    False,
+    # Override the image's entrypoint (which is the API server) so provisioning
+    # runs first: tailnet join, provenance check, weights, then exec vLLM.
+    'dockerEntrypoint':   ['bash','-lc',
+                           'set -e; echo \"\$PROVISION_B64\" | base64 -d > /provision.sh; exec bash /provision.sh'],
+    'dockerStartCmd':     [],
+    'env':                env,
+    'interruptible':      False,
+    'minVCPUPerGPU':      8,
+    'minRAMPerGPU':       32,
+}, indent=2))
+")"
+
+  if [ "${MODE:-run}" = dry ]; then
+    log "dry run — pod request below, nothing created (secrets redacted)"
+    printf '%s\n' "$body" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for k in ('TS_AUTHKEY','ENGINE_SECRET','PROVISION_B64'):
+    if k in d['env']: d['env'][k]='<redacted %d chars>' % len(d['env'][k])
+print(json.dumps(d,indent=2))" >&2
+    return 0
+  fi
+
+  log "creating pod: ${GPU_COUNT:-1} × ${RUNPOD_GPU_TYPE} in ${RUNPOD_DATACENTERS}" >&2
+  local resp pod_id
+  resp="$(rp POST /pods "$body")"
+  pod_id="$(printf '%s' "$resp" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
+  if [ -z "$pod_id" ]; then
+    printf '%s\n' "$resp" >&2
+    # On-demand capacity is not contractual. This is the single biggest
+    # availability difference from bare metal, and it fails at the least
+    # convenient moment.
+    die "pod creation failed. If this is a capacity error, try the next region in RUNPOD_DATACENTERS (note: a network volume is pinned to one datacenter, so a different region means re-downloading weights)."
+  fi
+  printf '%s' "$pod_id"
+}
+
+provider_destroy() { # provider_destroy ID
+  # DELETE, not /stop. A stopped pod keeps billing its container disk and holds
+  # the GPU reservation; the whole point of on-demand is that nothing but the
+  # volume survives.
+  rp DELETE "/pods/$1" >/dev/null \
+    || die "terminate call failed — check the provider console before assuming it is down"
+  local i
+  for i in $(seq 1 20); do
+    [ -z "$(provider_find || true)" ] && { log "pod gone"; return 0; }
+    sleep 3
+  done
+  log "pod still listed after 60 s — verify in the console"
+}

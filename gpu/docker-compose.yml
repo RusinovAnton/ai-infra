@@ -18,7 +18,9 @@ services:
   vllm:
     # vllm/vllm-openai:v0.26.0 as of 2026-08-05. Gated DeltaNet support is
     # recent, so >= 0.19.0 is a hard floor, not a preference.
-    image: vllm/vllm-openai@sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b
+    # Overridable so every provider runs the identical engine; default is the
+    # digest pinned in scripts/common.sh.
+    image: ${ENGINE_IMAGE:-vllm/vllm-openai@sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b}
     container_name: ai-infra-vllm
     restart: unless-stopped
     network_mode: host
@@ -30,7 +32,8 @@ services:
       # The persistent network volume, mounted at the HF cache path so
       # start/stop does not re-download 35 GB. Bills 24/7 regardless of whether
       # the pod exists.
-      - ${HF_HOME:-/runpod-volume}:/root/.cache/huggingface
+      # Same variable name the drivers set, so the rented and owned paths agree.
+      - ${HF_HOME_HOST:-./hf-cache}:/root/.cache/huggingface
     environment:
       HF_HUB_ENABLE_HF_TRANSFER: "1"
       # Only needed above 262k context. We serve 65k, so it is deliberately unset.

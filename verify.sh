@@ -187,6 +187,46 @@ else
   skip "tailnet checks (tailscaled not running on this machine)"
 fi
 
+head_ "5b. Provider drivers are swappable"
+# The point of the driver layer is that changing GPU supplier is one line in
+# scripts/.env. That only holds while nothing outside providers/ names a
+# provider, so assert it rather than trusting it.
+leak=$(grep -rlniE 'runpod' scripts/*.sh 2>/dev/null | grep -v '/providers/' || true)
+if [ -n "$leak" ]; then
+  # common.sh may name the DEFAULT; anything else is coupling.
+  leak=$(grep -rniE 'runpod' scripts/*.sh 2>/dev/null | grep -v '/providers/' \
+         | grep -vE 'GPU_PROVIDER:-runpod|^scripts/common\.sh:[0-9]+:#' || true)
+fi
+[ -z "$leak" ] && ok "no provider named outside scripts/providers/" \
+                || bad "provider coupling leaked out of providers/: $(printf '%s' "$leak" | head -2)"
+
+for drv in scripts/providers/*.sh; do
+  name=$(basename "$drv" .sh)
+  missing=""
+  for fn in provider_preflight provider_find provider_status provider_create provider_destroy provider_storage; do
+    grep -qE "^$fn\\(\\)" "$drv" || missing="$missing $fn"
+  done
+  kind=$(grep -oE '^PROVIDER_KIND=[a-z]+' "$drv" | cut -d= -f2)
+  case "$kind" in
+    ephemeral|persistent) ;;
+    *) missing="$missing PROVIDER_KIND" ;;
+  esac
+  [ -z "$missing" ] && ok "driver '$name' implements the contract (kind=$kind)" \
+                    || bad "driver '$name' is missing:$missing"
+done
+
+# A persistent driver destroying hardware is the one unrecoverable bug in this
+# layer, so assert the shape rather than hoping the comment is obeyed.
+for drv in scripts/providers/*.sh; do
+  grep -qE '^PROVIDER_KIND=persistent' "$drv" || continue
+  name=$(basename "$drv" .sh)
+  if grep -nE 'rm -rf|DELETE |terminate|destroy-machine|--volumes' "$drv" | grep -v '^\s*#' | grep -q .; then
+    bad "persistent driver '$name' contains a destructive call — it must only stop the engine"
+  else
+    ok "persistent driver '$name' cannot destroy the machine"
+  fi
+done
+
 head_ "6. GPU node config cannot expose the engine publicly"
 G=gpu/docker-compose.yml
 if grep -qE '^\s*ports:' "$G"; then
@@ -542,7 +582,7 @@ grep -qE 'DRAIN_TIMEOUT:-120' scripts/gpu-down.sh \
   && ok "drain has a 120 s hard timeout" || bad "drain has no hard timeout — gpu-down could hang forever"
 
 head_ "23. Scripts are syntactically valid and executable"
-for s in gpu/provision.sh scripts/gpu-up.sh scripts/gpu-down.sh scripts/idle-check.sh scripts/pg-backup.sh verify.sh; do
+for s in gpu/provision.sh scripts/gpu-up.sh scripts/gpu-down.sh scripts/idle-check.sh scripts/pg-backup.sh scripts/scheduler.sh install.sh scripts/providers/*.sh verify.sh; do
   bash -n "$s" 2>/dev/null && [ -x "$s" ] && ok "$s parses and is executable" || bad "$s fails bash -n or is not executable"
 done
 

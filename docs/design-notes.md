@@ -100,6 +100,23 @@ because the wrong version is the one a reader is likely to arrive with.
    cheaper Ada-or-newer pair appears. 2 × 3090 cannot run this model at all: no
    FP8, and 35 GB/card exceeds 24 GB even sharded.
 
+## The provider boundary
+
+The gateway knows one thing about the engine: a URL. That is the whole coupling,
+and it is why swapping GPU supplier is a line in `scripts/.env` rather than a
+migration.
+
+`scripts/providers/*.sh` is the only place a provider may be named, and
+`verify.sh` asserts that rather than trusting it — coupling leaks back in through
+one convenient reference at a time.
+
+The distinction that carries real weight is `PROVIDER_KIND`. An `ephemeral`
+node is destroyed when idle, because a stopped rented pod still bills. A
+`persistent` one is only ever stopped: on hardware you own, a wrong shutdown
+costs minutes and a wrong deletion costs a rebuild. `verify.sh` greps persistent
+drivers for destructive calls, because that asymmetry is the one bug in this
+layer you cannot undo.
+
 ## Accepted risks
 
 **The host operator can read prompts.** Inference decrypts in RAM and VRAM, and no

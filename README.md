@@ -28,6 +28,7 @@ tasks, not on code — see [docs/devops-setup.md](docs/devops-setup.md).
 | **Running the gateway** — access, keys, spend, models, backups | [docs/gateway-admin.md](docs/gateway-admin.md) |
 | **Writing code against it** | [docs/developer-guide.md](docs/developer-guide.md) — agent-agnostic, plus opencode / aider / Claude Code / VS Code / JetBrains |
 | **Handling a compromise or a runaway bill** | [docs/incident-response.md](docs/incident-response.md) — kill switch first |
+| **Changing GPU supplier, or moving to your own hardware** | [scripts/providers/README.md](scripts/providers/README.md) — the driver contract and the three shipped drivers |
 | **About to change something structural** | [docs/design-notes.md](docs/design-notes.md) — deliberate omissions, corrected assumptions, accepted risks |
 
 Beliefs that turned out to be wrong during the build are recorded in
@@ -44,9 +45,12 @@ gateway/  docker-compose.yml      LiteLLM + Postgres, loopback-bound, digest-pin
           config.yaml             two aliases on one engine, router + privacy settings
           error_hook.py           turns an unreachable engine into an actionable 503
           mock_engine.py          stdlib stub for configuring clients without spending
-gpu/      docker-compose.yml      vLLM flags — used on a VM provider
+install.sh                        prerequisites, .env generation, first start
+gpu/      docker-compose.yml      vLLM flags — used on a VM or a box you own
           provision.sh            runs ON the node: tailnet join, provenance, weights, engine
-scripts/  gpu-up.sh gpu-down.sh   RunPod REST wrappers; drain before destroy
+scripts/  gpu-up.sh gpu-down.sh   provider-agnostic lifecycle; drain before down
+          providers/              one file per GPU supplier — the only place a
+                                  provider is named (runpod / ssh / manual)
           scheduler.sh            cost guards + backups on a timer (sleep-safe; no cron)
           idle-check.sh           45 min idle + hard nightly stop
           pg-backup.sh            encrypted dump + rehearsed restore + retention audit
@@ -58,11 +62,14 @@ docs/                             per-role documentation (table above)
 ## Quick start
 
 ```bash
-cd gateway && cp .env.example .env && chmod 600 .env
+./install.sh --start
 ```
 
-Fill in `.env` — every secret with `openssl rand -hex 24`, and
-`LITELLM_MASTER_KEY` must start with `sk-`. Then:
+Checks prerequisites, generates every secret into `gateway/.env` at `0600`, and
+brings the gateway up. Idempotent — it never overwrites an existing `.env`.
+
+To do it by hand instead: copy `gateway/.env.example`, generate each secret with
+`openssl rand -hex 24`, and make `LITELLM_MASTER_KEY` start with `sk-`. Then:
 
 ```bash
 cd gateway && docker compose up -d

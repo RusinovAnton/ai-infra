@@ -9,57 +9,43 @@ SCRIPTS_DIR="$REPO_ROOT/scripts"
 log()  { printf '[%s %s] %s\n' "$(basename "${0}")" "$(date -u +%H:%M:%S)" "$*"; }
 die()  { printf '[%s] FATAL: %s\n' "$(basename "${0}")" "$*" >&2; exit 1; }
 
+# Exported, not just assigned: drivers build their request in an inline python3
+# that reads this from os.environ. Without an explicit export the JSON build
+# dies with KeyError: 'NODE_NAME'.
+export NODE_NAME="${NODE_NAME:-${POD_NAME:-ai-infra-gpu}}"
+
+# The engine image, here rather than in a driver: every provider must run the
+# same one, or the rented and owned paths stop being comparable.
+export ENGINE_IMAGE="${ENGINE_IMAGE:-vllm/vllm-openai@sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b}"
+
 load_env() {
   # scripts/.env holds provider credentials; gateway/.env holds gateway secrets.
-  # Kept apart so the office server can run the gateway without ever holding a
-  # RunPod API key that can create billable instances.
+  # Kept apart so a host can run the gateway without ever holding a credential
+  # that creates billable instances. (The scheduler container is the deliberate
+  # exception — see docs/design-notes.md.)
   [ -f "$SCRIPTS_DIR/.env" ] || die "missing $SCRIPTS_DIR/.env — copy .env.example"
   set -a; . "$SCRIPTS_DIR/.env"; set +a
   [ -f "$GATEWAY_DIR/.env" ] && { set -a; . "$GATEWAY_DIR/.env"; set +a; }
-  : "${RUNPOD_API_KEY:?set in scripts/.env}"
+
+  # ---------------------------------------------------------- provider driver
+  #
+  # Exactly one driver is loaded. Nothing outside scripts/providers/ may name a
+  # provider — that is what keeps "swap the GPU supplier" a one-line change
+  # rather than an audit of every script.
+  GPU_PROVIDER="${GPU_PROVIDER:-runpod}"
+  local drv="$SCRIPTS_DIR/providers/${GPU_PROVIDER}.sh"
+  [ -f "$drv" ] || die "unknown GPU_PROVIDER='$GPU_PROVIDER' — available: $(cd "$SCRIPTS_DIR/providers" && ls -1 *.sh 2>/dev/null | sed 's/\.sh$//' | tr '\n' ' ')"
+  # shellcheck disable=SC1090
+  . "$drv"
+
+  : "${PROVIDER_KIND:?driver $GPU_PROVIDER must set PROVIDER_KIND}"
+  provider_preflight
 }
 
-RP="https://rest.runpod.io/v1"
-
-rp() { # rp METHOD PATH [JSON_BODY]
-  local method="$1" path="$2" body="${3:-}"
-  if [ -n "$body" ]; then
-    curl -sS -m 120 -X "$method" "$RP$path" \
-      -H "Authorization: Bearer $RUNPOD_API_KEY" \
-      -H 'Content-Type: application/json' -d "$body"
-  else
-    curl -sS -m 120 -X "$method" "$RP$path" \
-      -H "Authorization: Bearer $RUNPOD_API_KEY"
-  fi
-}
-
-# Exported, not just assigned: gpu-up.sh builds the pod request in an inline
-# python3 that reads this from os.environ. Everything else it needs comes from
-# `set -a; . .env`, which auto-exports — this one is defined here, so without an
-# explicit export the JSON build dies with KeyError: 'POD_NAME'.
-export POD_NAME="${POD_NAME:-ai-infra-gpu}"
-
-# Empty output means no such pod. Callers must treat "not found" and "found but
-# stopped" differently — a stopped pod still bills its container disk.
-find_pod_id() {
-  rp GET "/pods" | python3 -c "
-import sys,json
-try: pods=json.load(sys.stdin)
-except Exception: sys.exit(0)
-pods = pods if isinstance(pods,list) else pods.get('data',[]) or pods.get('pods',[])
-for p in pods:
-    if p.get('name')=='$POD_NAME': print(p['id']); break
-"
-}
-
-pod_field() { # pod_field POD_ID FIELD
-  rp GET "/pods/$1" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-v=d.get('$2')
-print('' if v is None else (json.dumps(v) if isinstance(v,(dict,list)) else v))
-"
-}
+# A node that costs money by the hour should be destroyed when idle; one you own
+# should only ever be stopped. Callers branch on this rather than on the
+# provider's name.
+provider_is_ephemeral() { [ "${PROVIDER_KIND:-}" = ephemeral ]; }
 
 # ------------------------------------------------------------ portability
 #

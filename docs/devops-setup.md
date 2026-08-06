@@ -1,12 +1,17 @@
 # DevOps — build the infra from zero
 
 **Audience:** whoever stands the system up the first time. Assumes shell access
-to the office server, a Tailscale admin login, and authority to spend money on
-RunPod.
+to the server that will run the gateway, a Tailscale admin login, and — if you
+are renting the GPU rather than owning it — authority to spend money.
 
 **Result:** developers get an OpenAI-compatible endpoint at
 `https://gateway.<TAILNET>.ts.net/v1`, backed by an open-weight coding model on a
-rented GPU, reachable from nowhere else.
+GPU node, reachable from nowhere else.
+
+The gateway runs anywhere Docker runs: an on-prem server, a VPS, or a laptop
+while you are wiring it up. The GPU is a separate decision — rented by the hour,
+a machine you own, or one you start by hand. Both halves are chosen in
+`scripts/.env`, not in code.
 
 Read [design-notes.md](design-notes.md) before changing anything structural —
 several things that look missing are missing on purpose.
@@ -33,7 +38,22 @@ Everything else can be reordered.
 
 ## 1. Gateway stack (no GPU, no spend)
 
-On the office server:
+On the server — any Linux box, VPS, or on-prem machine with Docker:
+
+```bash
+./install.sh
+```
+
+Checks prerequisites (including whether Docker is enabled at boot, which decides
+whether the gateway survives a reboot), then generates every secret into
+`gateway/.env` at `0600` and copies the `scripts/.env` template. It never
+overwrites an existing `.env`, so it is safe to re-run.
+
+⚠️ It prints `BACKUP_PASSPHRASE`. Put it in the team password manager before you
+do anything else — lose it and every encrypted dump is scrap, and the backup
+script cannot tell you it is wrong until you attempt a restore.
+
+By hand instead:
 
 ```bash
 cd gateway && cp .env.example .env && chmod 600 .env
@@ -68,11 +88,12 @@ cd gateway && docker compose up -d
 Expect **0 failed**. Skips are GPU- and tailnet-dependent and clear as you work
 through this document. A failure here is a real problem — do not proceed past it.
 
-If Ollama is running on this machine, stop it. Two things serving models on one
-box is how a developer ends up talking to the wrong one for a week:
+If anything else on this box already serves models — Ollama, LM Studio, another
+vLLM — stop it. Two model servers on one host is how a developer ends up talking
+to the wrong one for a week:
 
 ```bash
-brew services stop ollama
+sudo systemctl stop ollama    # macOS: brew services stop ollama
 ```
 
 ## 2. Tailnet policy
@@ -166,6 +187,23 @@ curl -s https://gateway.<TAILNET>.ts.net/health/liveliness
 ```
 
 ## 4. GPU node
+
+**Pick a provider first.** `GPU_PROVIDER` in `scripts/.env` decides which
+hardware everything below talks to; nothing else in the setup changes.
+
+| `GPU_PROVIDER` | What it is | `gpu-down.sh` does |
+|---|---|---|
+| `runpod` | Rented on-demand pods, billed hourly | **destroys** the pod — a stopped one still bills |
+| `ssh` | A GPU box you own, or a VPS with a GPU + Docker | **stops the engine**; the machine is never touched |
+| `manual` | You start the engine yourself | tells you to stop it; drains first |
+
+The sections below are written for `runpod`, because that path has the most
+moving parts — capacity, datacenters, network volumes, none of which exist when
+the hardware is yours. On `ssh` you skip §4.1–§4.3 entirely: the machine already
+exists, weights live on its own disk, and there is nothing billing while idle.
+
+Full contract, and how to add a fourth provider, in
+[scripts/providers/README.md](../scripts/providers/README.md).
 
 ### 4.1 RunPod account
 
