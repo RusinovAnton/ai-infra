@@ -37,53 +37,6 @@ print('%s %s' % (st, '-' if pr is None else pr))
 " 2>/dev/null || printf 'unknown -'
 }
 
-# What else could run this model right now. Only cards that can actually serve
-# the FP8 checkpoint on ONE GPU: >=48 GB, and FP8 tensor cores, which means Ada
-# or newer. Ampere (A40, A6000, A100) is excluded on purpose — it has the VRAM
-# but no FP8, so it would silently serve the checkpoint far slower.
-rp_alternatives() {
-  local ids
-  ids="$(curl -sS -m 30 -X POST "$RP_GQL" \
-      -H "Authorization: Bearer $RUNPOD_API_KEY" -H 'Content-Type: application/json' \
-      -d '{"query":"query { gpuTypes { id memoryInGb } }"}' 2>/dev/null | python3 -c "
-import sys, json
-BAD = ('A40','A6000','A100','MI300')          # >=48 GB but no FP8
-try: gs = json.load(sys.stdin)['data']['gpuTypes']
-except Exception: raise SystemExit
-for g in gs:
-    i = g.get('id') or ''
-    if (g.get('memoryInGb') or 0) >= 48 and not any(b in i for b in BAD):
-        print(i)
-" 2>/dev/null || true)"
-  [ -n "$ids" ] || return 0
-  log "cards that could serve this model, with stock right now:"
-  local id out st pr
-  while read -r id; do
-    [ -n "$id" ] || continue
-    out="$(rp_stock_global "$id")"
-    st="${out%% *}"; pr="${out##* }"
-    [ "$st" = "None" ] || [ "$st" = "unknown" ] || log "  \$$pr/hr  stock=$st  RUNPOD_GPU_TYPE=\"$id\""
-  done <<EOF
-$ids
-EOF
-  log "set the one you want in scripts/.env and re-run"
-}
-
-# Same as rp_stock but without pinning a datacenter.
-rp_stock_global() {
-  local body
-  body="$(printf '{"query":"query($id:String!){ gpuTypes(input:{id:$id}) { lowestPrice(input:{gpuCount:%d,secureCloud:true}) { stockStatus uninterruptablePrice } } }","variables":{"id":"%s"}}' \
-      "${GPU_COUNT:-1}" "$1")"
-  curl -sS -m 20 -X POST "$RP_GQL" \
-    -H "Authorization: Bearer $RUNPOD_API_KEY" -H 'Content-Type: application/json' \
-    -d "$body" 2>/dev/null | python3 -c "
-import sys, json
-try: lp = json.load(sys.stdin)['data']['gpuTypes'][0]['lowestPrice']
-except Exception: print('unknown -'); raise SystemExit
-print('%s %s' % (lp.get('stockStatus') or 'None', lp.get('uninterruptablePrice') if lp.get('uninterruptablePrice') is not None else '-'))
-" 2>/dev/null || printf 'unknown -'
-}
-
 # Returns 0 if at least one configured datacenter has stock. Prints a report.
 provider_capacity() {
   local dc st pr any=1
@@ -112,8 +65,52 @@ rp() { # rp METHOD PATH [JSON_BODY]
 
 provider_preflight() {
   : "${RUNPOD_API_KEY:?set in scripts/.env}"
-  : "${RUNPOD_GPU_TYPE:?set in scripts/.env}"
   : "${RUNPOD_DATACENTERS:?set in scripts/.env}"
+  # RUNPOD_GPU_TYPE may be empty or "auto" — choose_gpu() in common.sh fills it.
+}
+
+# The driver's entire contribution to choosing hardware: what is rentable, right
+# now, as data. No policy — which of these is SUITABLE is a property of the model
+# we are serving, not of this provider, so it lives in common.sh.
+#
+# Format, one offer per line, tab-separated:
+#   <id>  <vram_gb>  <price_per_hr>  <stock>  <location>
+provider_offers() {
+  local ids id out st pr mem
+  ids="$(curl -sS -m 30 -X POST "$RP_GQL" \
+      -H "Authorization: Bearer $RUNPOD_API_KEY" -H 'Content-Type: application/json' \
+      -d '{"query":"query { gpuTypes { id memoryInGb } }"}' 2>/dev/null | python3 -c "
+import sys, json
+try: gs = json.load(sys.stdin)['data']['gpuTypes']
+except Exception: raise SystemExit
+for g in gs:
+    print('%s\t%s' % (g.get('id') or '', g.get('memoryInGb') or 0))
+" 2>/dev/null || true)"
+
+  while IFS="$(printf '\t')" read -r id mem; do
+    [ -n "$id" ] || continue
+    out="$(rp_stock_global "$id")"
+    st="${out%% *}"; pr="${out##* }"
+    case "$st" in None|unknown) continue ;; esac
+    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$mem" "$pr" "$st" "${RUNPOD_DATACENTERS%%,*}+"
+  done <<EOF
+$ids
+EOF
+}
+
+# Same as rp_stock but without pinning a datacenter.
+rp_stock_global() {
+  local body
+  body="$(printf '{"query":"query($id:String!){ gpuTypes(input:{id:$id}) { lowestPrice(input:{gpuCount:%d,secureCloud:true}) { stockStatus uninterruptablePrice } } }","variables":{"id":"%s"}}' \
+      "${GPU_COUNT:-1}" "$1")"
+  curl -sS -m 20 -X POST "$RP_GQL" \
+    -H "Authorization: Bearer $RUNPOD_API_KEY" -H 'Content-Type: application/json' \
+    -d "$body" 2>/dev/null | python3 -c "
+import sys, json
+try: lp = json.load(sys.stdin)['data']['gpuTypes'][0]['lowestPrice']
+except Exception: print('unknown -'); raise SystemExit
+print('%s %s' % (lp.get('stockStatus') or 'None', lp.get('uninterruptablePrice') if lp.get('uninterruptablePrice') is not None else '-'))
+" 2>/dev/null || printf 'unknown -'
 }
 
 provider_find() {
@@ -193,6 +190,14 @@ for x in v:
 
 provider_create() {
   : "${TS_AUTHKEY:?set in scripts/.env}"
+
+  # choose_gpu() is generic and lives in common.sh; it sets GPU_CHOICE. The
+  # driver only translates that into its own request field.
+  # An explicitly configured RUNPOD_GPU_TYPE is an explicit choice; otherwise
+  # the generic chooser decides. Either way GPU_CHOICE ends up authoritative.
+  GPU_SELECT="${GPU_SELECT:-${RUNPOD_GPU_TYPE:-auto}}" choose_gpu >&2
+  RUNPOD_GPU_TYPE="${GPU_CHOICE:?no GPU chosen}"
+  export RUNPOD_GPU_TYPE
 
   # RUNPOD_VOLUME_ID is OPTIONAL, and empty is usually the better choice.
   #
@@ -290,8 +295,8 @@ print(json.dumps(d,indent=2))" >&2
     case "$resp" in
       *"no instances"*|*"not available"*|*capacity*)
         log "no capacity for $RUNPOD_GPU_TYPE in: $RUNPOD_DATACENTERS"
-        rp_alternatives
-        die "no capacity for the configured GPU — pick one listed above, or wait"
+        show_offers
+        die "no capacity for that GPU — pick one listed above, or unset RUNPOD_GPU_TYPE to choose automatically"
         ;;
     esac
     if [ -n "${RUNPOD_VOLUME_ID:-}" ]; then

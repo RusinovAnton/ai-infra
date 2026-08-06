@@ -72,6 +72,89 @@ provider_is_ephemeral() { [ "${PROVIDER_KIND:-}" = ephemeral ]; }
 # Optional in the driver contract: hardware you own has no "capacity" to check.
 provider_capacity() { log "provider '$GPU_PROVIDER' has no capacity concept — the machine either exists or it does not"; return 0; }
 
+# Optional in the driver contract. A provider that rents by the hour lists what
+# is rentable; one that drives hardware you own has nothing to offer.
+# Format per line, tab-separated: <id> <vram_gb> <price_per_hr> <stock> <where>
+provider_offers() { :; }
+
+# ------------------------------------------------------------ choosing hardware
+#
+# This is POLICY, and it is deliberately here rather than in a driver: what makes
+# a GPU suitable is a property of the model being served, not of whoever rents
+# it. A new provider supplies provider_offers() and inherits all of this.
+#
+#   - GPU_MIN_VRAM_GB on ONE card. The FP8 checkpoint is ~35 GB; splitting it
+#     across smaller cards needs tensor parallelism, and consumer cards have no
+#     NVLink, so TP crosses PCIe and costs more than the cheaper rate saves.
+#   - FP8 tensor cores, i.e. Ada or newer. Ampere (A100/A40/A6000) has the VRAM
+#     and would serve this checkpoint WITHOUT ERRORING, just far slower. That is
+#     the worst failure mode available, so those are excluded by name.
+#   - CUDA: the pinned engine image is not ROCm, so AMD is excluded.
+GPU_MIN_VRAM_GB="${GPU_MIN_VRAM_GB:-48}"
+GPU_EXCLUDE="${GPU_EXCLUDE:-A100|A40|A6000|A5000|A4000|V100|T4|MI300|MI250|RTX 3}"
+
+# Suitable offers, cheapest first.
+gpu_shortlist() {
+  provider_offers | MINV="$GPU_MIN_VRAM_GB" EXCL="$GPU_EXCLUDE" MAXP="${GPU_MAX_PRICE:-}" python3 -c "
+import sys, os, re
+minv = float(os.environ['MINV']); excl = re.compile(os.environ['EXCL'])
+maxp = float(os.environ['MAXP']) if os.environ.get('MAXP') else None
+rows = []
+for line in sys.stdin:
+    f = line.rstrip('\n').split('\t')
+    if len(f) < 4: continue
+    gid, mem, price, stock = f[0], f[1], f[2], f[3]
+    try: mem = float(mem); price = float(price)
+    except ValueError: continue
+    if mem < minv or excl.search(gid): continue
+    if maxp is not None and price > maxp: continue
+    rows.append((price, gid, mem, stock, f[4] if len(f) > 4 else ''))
+for price, gid, mem, stock, where in sorted(rows):
+    print('%s\t%g\t%s\t%s\t%s' % (gid, mem, price, stock, where))
+"
+}
+
+show_offers() {
+  local n=0 gid mem price stock where
+  log "suitable and rentable now (>=${GPU_MIN_VRAM_GB}GB, FP8-capable${GPU_MAX_PRICE:+, <= \$$GPU_MAX_PRICE/hr}):"
+  while IFS="$(printf '\t')" read -r gid mem price stock where; do
+    n=$((n+1))
+    log "  $n) \$$price/hr  ${mem}GB  stock=$stock  $gid"
+  done <<EOF
+$(gpu_shortlist)
+EOF
+  [ "$n" = 0 ] && log "  (nothing — lower GPU_MIN_VRAM_GB, raise GPU_MAX_PRICE, or wait)"
+  return 0
+}
+
+# Sets GPU_CHOICE. Honours an explicit choice, otherwise takes the cheapest —
+# or asks, when --pick was passed AND this is a terminal. It must never block
+# waiting for input it cannot receive: gpu-up runs from the scheduler too.
+choose_gpu() {
+  GPU_CHOICE=""
+  case "${GPU_SELECT:-auto}" in
+    ""|auto) ;;
+    *) GPU_CHOICE="$GPU_SELECT"; log "using the GPU named in the environment: $GPU_CHOICE"; return 0 ;;
+  esac
+
+  local list; list="$(gpu_shortlist)"
+  [ -n "$list" ] || { show_offers; die "nothing available meeting the constraints"; }
+
+  if [ "${GPU_PICK:-0}" = 1 ] && [ -t 0 ]; then
+    show_offers
+    printf 'choose [1]: ' >&2
+    local n; read -r n </dev/tty || n=""
+    [ -n "$n" ] || n=1
+    GPU_CHOICE="$(printf '%s\n' "$list" | sed -n "${n}p" | cut -f1)"
+    [ -n "$GPU_CHOICE" ] || die "no such option: $n"
+  else
+    GPU_CHOICE="$(printf '%s\n' "$list" | head -1 | cut -f1)"
+  fi
+
+  local row; row="$(printf '%s\n' "$list" | grep -F "$GPU_CHOICE" | head -1)"
+  log "GPU: $GPU_CHOICE  ($(printf '%s' "$row" | cut -f2)GB, \$$(printf '%s' "$row" | cut -f3)/hr, stock=$(printf '%s' "$row" | cut -f4))"
+}
+
 # ------------------------------------------------------------ portability
 #
 # These scripts run in two places: on the gateway host, and inside the optional
@@ -105,6 +188,53 @@ pgx() { # pgx PROGRAM [ARGS...]
   else
     ( cd "$GATEWAY_DIR" && docker compose exec -T litellm-db "$@" )
   fi
+}
+
+# ------------------------------------------------------- engine host discovery
+#
+# The node's MagicDNS name is assigned by Tailscale, NOT chosen by us. Ask for
+# `gpu` while a stale node still holds that name and the new node silently
+# becomes `gpu-1` — so ENGINE_API_BASE keeps pointing at a machine that no
+# longer exists, and every symptom looks like "the engine never came up".
+#
+# Generic on purpose: any provider whose node joins the tailnet as tag:gpu gets
+# this, because the failure is Tailscale's naming, not the provider's.
+engine_host_on_tailnet() {
+  command -v tailscale >/dev/null 2>&1 || return 1
+  tailscale status --json 2>/dev/null | python3 -c "
+import sys, json
+try: d = json.load(sys.stdin)
+except Exception: raise SystemExit
+names = [ (p.get('DNSName') or '').rstrip('.')
+          for p in (d.get('Peer') or {}).values()
+          if 'tag:gpu' in (p.get('Tags') or []) and p.get('Online') ]
+if len(names) > 1:
+    sys.stderr.write('MULTIPLE:' + ','.join(names) + '\n')
+if names: print(names[0])
+" 2>/dev/null
+}
+
+# Rewrites ENGINE_API_BASE when the node came up under a different name, and
+# recreates the gateway so LiteLLM actually picks it up (`restart` would reuse
+# the old environment).
+sync_engine_host() {
+  local found current
+  found="$(engine_host_on_tailnet || true)"
+  [ -n "$found" ] || return 0
+  current="$(printf '%s' "${ENGINE_API_BASE:-}" | sed -E 's#^https?://##; s#[:/].*##')"
+  [ "$found" = "$current" ] && return 0
+
+  log "the node joined as '$found', but ENGINE_API_BASE points at '$current'"
+  log "  (a stale tailnet node holding the name makes Tailscale append -1)"
+  ENGINE_API_BASE="http://${found}:8000/v1"
+  local tmp; tmp="$(mktemp)"
+  sed "s|^ENGINE_API_BASE=.*|ENGINE_API_BASE=${ENGINE_API_BASE}|" "$GATEWAY_DIR/.env" > "$tmp"
+  cat "$tmp" > "$GATEWAY_DIR/.env"      # preserves 0600
+  rm -f "$tmp"
+  export ENGINE_API_BASE
+  log "ENGINE_API_BASE -> $ENGINE_API_BASE; recreating the gateway"
+  ( cd "$GATEWAY_DIR" && docker compose up -d --force-recreate litellm >/dev/null 2>&1 ) \
+    || log "WARNING: could not recreate litellm — do it by hand or it keeps the old engine URL"
 }
 
 # The engine, reached the only way anything is allowed to reach it.

@@ -5,7 +5,9 @@
 #
 #   ./gpu-up.sh                   bring the node up and wait for the engine
 #   ./gpu-up.sh --create-storage  one-time storage setup, if the provider needs it
-#   ./gpu-up.sh --check-capacity  is the GPU actually available? costs nothing
+#   ./gpu-up.sh --list-gpus       what is rentable right now, cheapest first
+#   ./gpu-up.sh --pick            choose interactively instead of taking cheapest
+#   ./gpu-up.sh --check-capacity  is the configured GPU available? costs nothing
 #   ./gpu-up.sh --dry-run         print what would be created, spending nothing
 #
 # Provider-agnostic. Which hardware this talks to is GPU_PROVIDER in
@@ -18,6 +20,8 @@ MODE=run
 case "${1:-}" in
   --create-storage|--create-volume) MODE=storage ;;   # --create-volume kept working
   --check-capacity)                 MODE=capacity ;;
+  --list-gpus)                      MODE=offers ;;
+  --pick)                           GPU_PICK=1; export GPU_PICK ;;
   --dry-run)                        MODE=dry ;;
   "")                               ;;
   *)                                die "unknown argument: $1" ;;
@@ -25,6 +29,11 @@ esac
 export MODE
 
 # ------------------------------------------------------------ storage
+
+if [ "$MODE" = offers ]; then
+  show_offers
+  exit 0
+fi
 
 if [ "$MODE" = capacity ]; then
   # The driver reports WHERE it looked; this layer must not name the knob.
@@ -92,6 +101,16 @@ fi
 # tag:gpu appearing online is NOT readiness — weights still have to load from
 # the volume into VRAM. The only honest readiness signal is the engine
 # answering, through the tailnet, which is the only path that is allowed.
+# The node has to appear on the tailnet before its name can be read, and the
+# name is what the gateway talks to. Doing this before the readiness loop turns
+# "the engine never answered" into "the engine is at a different name".
+log "waiting for the node to appear on the tailnet"
+for _ in $(seq 1 40); do
+  [ -n "$(engine_host_on_tailnet || true)" ] && break
+  sleep 5
+done
+sync_engine_host
+
 log "waiting for the engine at $(engine_base) (cold start is minutes, not seconds)"
 deadline=$(( $(date +%s) + 1800 ))
 until engine_ready 2>/dev/null; do

@@ -139,6 +139,33 @@ denials you assert in `tests` fail validation while the policy is correct. A
 `tests` entry needs a concrete identity, so proving the developer path requires a
 real non-admin account and cannot be done in the policy file at all.
 
+### A stale node silently renames the new one, and the gateway keeps talking to the corpse
+
+**What it looked like.** Pod up, disk 63% (weights clearly downloaded), and the
+engine unreachable. `ENGINE_API_BASE` was correct. Nothing in the pod's status
+suggested a naming problem.
+
+**What was true.** The previous node was still listed — offline, last seen 49
+minutes earlier — and still held the name `gpu`. MagicDNS does not reuse a name
+in use, so the new node joined as **`gpu-1`**. The gateway went on resolving
+`gpu`, which pointed at a machine that no longer existed. Every symptom read as
+"the engine never started".
+
+The node should have removed itself: the auth key is meant to be ephemeral,
+which deletes a node when it disconnects. It did not, which is worth checking on
+the key rather than assuming.
+
+**What changed.** `gpu-up.sh` now waits for a `tag:gpu` node to appear, reads its
+**actual** DNS name from the tailnet, and rewrites `ENGINE_API_BASE` plus
+recreates the gateway if it differs. It also warns when more than one online
+`tag:gpu` node exists. The logic is generic rather than provider-specific,
+because the failure belongs to Tailscale's naming, not to whoever rents the box.
+
+**The general lesson.** We treated a hostname as something we assign. It is
+something we *request* — the name authority is elsewhere and may hand back
+something else, silently. Anywhere a name is requested rather than assigned,
+read back what you actually got.
+
 ### The console holds the running policy, the repo holds the intended one
 
 Hours were spent debugging why a phone could not reach the gateway. The policy in
