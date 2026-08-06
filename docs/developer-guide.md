@@ -347,7 +347,7 @@ minutes idle and unconditionally at 22:00. That's normal, not an outage.
 
 | What you see | What it means | What to do |
 |---|---|---|
-| `503` "the GPU is not running" | node is stopped — often just idle shutdown | start it (below), wait a few minutes |
+| `503` "model backend is currently offline" | node is stopped — often just idle shutdown | retry in a few minutes; if it persists, tell an admin |
 | Connection timeout | not on the tailnet, or device not approved | check the Tailscale app; then ask an admin |
 | `401` | key wrong, expired or revoked | ask an admin |
 | `400 model not found` | your key doesn't include that alias | ask an admin for `coder-max` |
@@ -356,14 +356,10 @@ minutes idle and unconditionally at 22:00. That's normal, not an outage.
 | Agent gets prose where it wants a tool call | engine-side parser problem | tell an admin — reproduce in opencode, not aider |
 | TLS / certificate error | gateway-side; not your machine | tell an admin |
 
-**Starting the node.** If you have the operator credentials:
-
-```bash
-./scripts/gpu-up.sh
-```
-
-First run of the day takes minutes — weights load into VRAM. If you don't have
-them, ask; whether developers may start the GPU is a per-team decision.
+**Starting the node** is an operator action (`gpu-up.sh`, operator
+credentials). Some teams give developers those credentials; if yours does, first
+run of the day takes minutes while weights load into VRAM. If not, a 503 is a
+"wait or ask" situation, never a bug to file.
 
 Reporting a problem usefully: which alias, which tool, the status code, and
 whether `curl` (the one-liner above) also fails. That last one splits "the gateway

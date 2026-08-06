@@ -1,9 +1,19 @@
-"""Turn "the GPU node is not running" into an error that names the fix.
+"""Turn "the GPU node is not running" into an error each audience can act on.
 
 Without this, a stopped engine surfaces as a bare 500 from LiteLLM. A developer
-reading that opens a bug against the gateway; what they actually need to do is
-run `gpu-up`. The gateway itself is healthy in this state and keeps serving
-/v1/models, which makes the 500 even more misleading.
+reading that opens a bug against the gateway. The gateway itself is healthy in
+this state and keeps serving /v1/models, which makes the 500 even more
+misleading.
+
+Two audiences, deliberately split:
+  - the RESPONSE is for developers, who cannot and should not run
+    infrastructure commands — it says the model is down, retrying is fine, and
+    who to poke if it stays down;
+  - the gateway LOG carries the operator detail (gpu-up.sh, capacity,
+    cold-start timing), because whoever can act on that has log access.
+Putting admin instructions in the client response quietly implied every
+developer holds the provider credentials, which is exactly the split
+scripts/.env exists to prevent.
 
 Loaded via `litellm_settings.callbacks` in config.yaml. LiteLLM calls
 async_post_call_failure_hook for every request that fails, and an exception
@@ -32,11 +42,17 @@ _UNREACHABLE = (
     "network is unreachable",
 )
 
+# What a developer sees. No infra commands, no provider vocabulary.
 _MESSAGE = (
-    "Inference node is stopped or unreachable — the gateway is healthy, the GPU "
-    "is not. Run `scripts/gpu-up.sh` and retry; it takes a few minutes for "
-    "weights to load. If gpu-up reports no capacity, try the fallback region. "
-    "This is not a gateway bug."
+    "The model backend is currently offline. It may be starting up — retry in "
+    "a few minutes. If this persists, tell whoever runs your gateway."
+)
+
+# What the operator sees, in `docker compose logs litellm`.
+_OPERATOR_LOG = (
+    "engine unreachable — the gateway is healthy, the GPU node is not. "
+    "Run `scripts/gpu-up.sh`; cold start takes minutes. If it reports no "
+    "capacity, see `gpu-up.sh --list-gpus`. Not a gateway bug."
 )
 
 
@@ -46,6 +62,9 @@ class EngineDownHandler(CustomLogger):
     ):
         text = f"{type(original_exception).__name__} {original_exception}".lower()
         if any(needle in text for needle in _UNREACHABLE):
+            # stdout -> `docker compose logs litellm`. The operator detail goes
+            # here, where only operators can read it.
+            print(f"[engine-down] {_OPERATOR_LOG}", flush=True)
             # 503 rather than 500: the condition is temporary and the client is
             # not at fault. Retry-After is a hint, not a promise.
             raise HTTPException(
