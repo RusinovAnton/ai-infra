@@ -42,6 +42,13 @@ router_settings:
     - {"coder-max": ["coder"]}
 
 litellm_settings:
+  # Clients that know a model reasons send OpenAI-isms like reasoning_effort;
+  # vLLM's OpenAI surface does not take that parameter (thinking is switched via
+  # chat_template_kwargs, per alias below), and without this LiteLLM rejects the
+  # whole request rather than forwarding it. Dropping unknown params is correct
+  # here BECAUSE this gateway fronts exactly one engine: nothing dropped is
+  # load-bearing. extra_body passthrough is unaffected — verify.sh checks it.
+  drop_params: true
   # Spend records yes, prompt content no. Pairs with --disable-log-requests on
   # the engine: prompts then exist only in RAM, on both machines.
   #
