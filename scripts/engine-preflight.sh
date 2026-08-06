@@ -70,3 +70,19 @@ check_file "$REPO_ROOT/gpu/docker-compose.yml"
 
 [ "$fail" = 0 ] || die "at least one flag is unknown to the pinned engine image — fix before spending money"
 log "all engine flags are accepted by the pinned image"
+
+# The other pre-pod fact the image holds: which CUDA its torch is built for.
+# torch refuses any HOST driver older than this, so every entry in
+# RUNPOD_CUDA_VERSIONS below it buys a placement that cannot boot.
+TORCH_CUDA="$(docker run --rm "${PLATFORM[@]}" --entrypoint python3 "$ENGINE_IMAGE" \
+  -c 'import torch; print(torch.version.cuda)' 2>/dev/null | tail -1)"
+log "image torch is built for CUDA ${TORCH_CUDA:-unknown}"
+if [ -n "${TORCH_CUDA:-}" ]; then
+  bad_v=""
+  for v in $(printf '%s' "${RUNPOD_CUDA_VERSIONS:-13.0}" | tr ',' ' '); do
+    python3 -c "import sys; sys.exit(0 if tuple(map(int,'$v'.split('.'))) >= tuple(map(int,'$TORCH_CUDA'.split('.'))) else 1)" \
+      || bad_v="$bad_v $v"
+  done
+  [ -z "$bad_v" ] || die "RUNPOD_CUDA_VERSIONS allows$bad_v — older than the image's CUDA $TORCH_CUDA build; torch will refuse those hosts ('driver too old')"
+  log "RUNPOD_CUDA_VERSIONS is consistent with the image"
+fi

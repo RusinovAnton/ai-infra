@@ -246,7 +246,12 @@ req = {
     # inscrutable init failure. Four launches died on this. NOTE this comment
     # sits inside a shell double-quoted string: a double quote here truncates
     # the python source at that character.
-    'allowedCudaVersions': os.environ.get('RUNPOD_CUDA_VERSIONS','12.8,13.0').split(','),
+    # Default derived from the image, not guessed: the pinned torch is a
+    # cu130 build (torch.version.cuda == 13.0), and torch refuses any older
+    # driver -- a 12.8 host fails with 'driver too old (found version 12080)'.
+    # engine-preflight.sh prints the image's build so this stays honest when
+    # the digest changes.
+    'allowedCudaVersions': os.environ.get('RUNPOD_CUDA_VERSIONS','13.0').split(','),
     'interruptible':      False,
     'minVCPUPerGPU':      8,
     'minRAMPerGPU':       32,

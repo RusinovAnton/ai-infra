@@ -112,15 +112,24 @@ was placing us on hosts with 12.4 drivers. The console's deploy form has a CUDA
 version picker — the API equivalent is `allowedCudaVersions`, which we never
 sent, so every API launch was a lottery on host driver age.
 
-**What changed.** The driver sends `allowedCudaVersions` (default `12.8,13.0`,
-override with `RUNPOD_CUDA_VERSIONS`). Found only because the failure endpoint's
-`error_lines` finally carried the EngineCore lines — the same error had been in
-the console logs of every previous failed pod, buried above the wrapper.
+**What changed.** The driver sends `allowedCudaVersions` (override with
+`RUNPOD_CUDA_VERSIONS`). Found only because the failure endpoint's `error_lines`
+finally carried the EngineCore lines — the same error had been in the console
+logs of every previous failed pod, buried above the wrapper.
+
+**Second round, same lesson sharpened.** The first fix allowed `12.8,13.0` — a
+guess — and the very next launch landed on a 12.8 host and died identically:
+`too old (found version 12080)`. The floor is not negotiable and not ours to
+pick: the image's torch is a `cu130` build, and `torch.version.cuda` says so on
+any laptop with Docker, for free. The default is now `13.0` alone, and
+`engine-preflight.sh` reads the build out of the image and refuses a
+`RUNPOD_CUDA_VERSIONS` that allows anything older.
 
 **The general lesson.** Pinning the image pins *your* half of the contract. The
 host's driver is the other half, and on a rented fleet it varies per placement.
-If the provider's UI offers a filter, the API has the same knob — find it, set
-it, or your failures become nondeterministic.
+And when the constraint's exact value is readable from the artifact you already
+have, read it — a guessed threshold fails the same way as no threshold, just
+less often.
 
 ### Capacity is a snapshot, not a property
 
