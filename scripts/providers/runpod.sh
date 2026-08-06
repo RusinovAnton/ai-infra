@@ -12,6 +12,45 @@ PROVIDER_BILLS_IDLE="the weights volume still bills while no pod exists"
 
 RP="${RUNPOD_API_BASE:-https://rest.runpod.io/v1}"
 
+# Capacity lives on the GraphQL API only. The REST API exposes no GPU-type and
+# no datacenter endpoint at all — every path 400s with "does not exist in the
+# specification" — so this is not a stylistic choice. Requires the API key to
+# have the api.runpod.io/graphql scope enabled.
+RP_GQL="${RUNPOD_GRAPHQL:-https://api.runpod.io/graphql}"
+
+# rp_stock DATACENTER -> "<stockStatus> <price>", e.g. "Low 0.99" / "None -"
+rp_stock() {
+  local dc="$1" body
+  body="$(printf '{"query":"query($id:String!,$dc:String){ gpuTypes(input:{id:$id}) { lowestPrice(input:{gpuCount:%d,dataCenterId:$dc,secureCloud:true}) { stockStatus uninterruptablePrice } } }","variables":{"id":"%s","dc":"%s"}}' \
+      "${GPU_COUNT:-1}" "$RUNPOD_GPU_TYPE" "$dc")"
+  curl -sS -m 30 -X POST "$RP_GQL" \
+    -H "Authorization: Bearer $RUNPOD_API_KEY" -H 'Content-Type: application/json' \
+    -d "$body" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    lp = json.load(sys.stdin)['data']['gpuTypes'][0]['lowestPrice']
+except Exception:
+    print('unknown -'); raise SystemExit
+st = lp.get('stockStatus') or 'None'
+pr = lp.get('uninterruptablePrice')
+print('%s %s' % (st, '-' if pr is None else pr))
+" 2>/dev/null || printf 'unknown -'
+}
+
+# Returns 0 if at least one configured datacenter has stock. Prints a report.
+provider_capacity() {
+  local dc st pr any=1
+  log "${GPU_COUNT:-1} × ${RUNPOD_GPU_TYPE}, secure cloud:"
+  for dc in ${RUNPOD_DATACENTERS//,/ }; do
+    read -r st pr <<<"$(rp_stock "$dc")"
+    case "$st" in
+      None|unknown) log "  $dc  no capacity" ;;
+      *)            log "  $dc  stock=$st  \$$pr/hr"; any=0 ;;
+    esac
+  done
+  return $any
+}
+
 rp() { # rp METHOD PATH [JSON_BODY]
   local method="$1" path="$2" body="${3:-}"
   if [ -n "$body" ]; then
@@ -73,6 +112,21 @@ for x in v:
     log "put its id in scripts/.env as RUNPOD_VOLUME_ID, or delete it first if you want a new one"
     return 0
   fi
+
+  # Capacity BEFORE storage. A volume is pinned to one datacenter forever and
+  # bills 24/7 from creation, so creating one where the GPU is unavailable buys
+  # a monthly cost for hardware you cannot rent. This is the single most
+  # expensive ordering mistake available here.
+  local st pr
+  read -r st pr <<<"$(rp_stock "$dc")"
+  case "$st" in
+    None|unknown)
+      log "$RUNPOD_GPU_TYPE has NO capacity in $dc right now (stock=$st)"
+      log "check other regions first:  ./scripts/gpu-up.sh --check-capacity"
+      die "refusing to create a volume pinned to a datacenter that cannot run your GPU"
+      ;;
+    *) log "capacity check: $dc has stock=$st at \$$pr/hr" ;;
+  esac
 
   log "creating a 200 GB network volume in $dc"
   # Sized for the primary (~35 GB) plus the 27B A/B (~54 GB). Pinned to one

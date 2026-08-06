@@ -5,6 +5,7 @@
 #
 #   ./gpu-up.sh                   bring the node up and wait for the engine
 #   ./gpu-up.sh --create-storage  one-time storage setup, if the provider needs it
+#   ./gpu-up.sh --check-capacity  is the GPU actually available? costs nothing
 #   ./gpu-up.sh --dry-run         print what would be created, spending nothing
 #
 # Provider-agnostic. Which hardware this talks to is GPU_PROVIDER in
@@ -16,6 +17,7 @@ load_env
 MODE=run
 case "${1:-}" in
   --create-storage|--create-volume) MODE=storage ;;   # --create-volume kept working
+  --check-capacity)                 MODE=capacity ;;
   --dry-run)                        MODE=dry ;;
   "")                               ;;
   *)                                die "unknown argument: $1" ;;
@@ -23,6 +25,11 @@ esac
 export MODE
 
 # ------------------------------------------------------------ storage
+
+if [ "$MODE" = capacity ]; then
+  provider_capacity || die "no capacity in any configured datacenter — widen RUNPOD_DATACENTERS or wait"
+  exit 0
+fi
 
 if [ "$MODE" = storage ]; then
   provider_storage

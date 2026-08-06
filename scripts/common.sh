@@ -56,7 +56,11 @@ load_env() {
 # So only the paths that CREATE something call this.
 check_placeholders() {
   local names
-  names="$(grep -hE '^[A-Z_]+=CHANGE-ME[[:space:]]*$' "$SCRIPTS_DIR/.env" "$GATEWAY_DIR/.env" 2>/dev/null | cut -d= -f1 | tr '\n' ' ')"
+  # `|| true` is load-bearing: grep exits 1 when it matches nothing, pipefail
+  # propagates that, and set -e then kills the script — silently, because here
+  # "no matches" is the SUCCESS case. Without it this function aborts every
+  # caller precisely when the config is correct.
+  names="$(grep -hE '^[A-Z_]+=CHANGE-ME[[:space:]]*$' "$SCRIPTS_DIR/.env" "$GATEWAY_DIR/.env" 2>/dev/null | cut -d= -f1 | tr '\n' ' ' || true)"
   [ -z "$names" ] || die "unfilled placeholder(s): ${names}— set them in scripts/.env (or gateway/.env) before running this"
 }
 
@@ -64,6 +68,9 @@ check_placeholders() {
 # should only ever be stopped. Callers branch on this rather than on the
 # provider's name.
 provider_is_ephemeral() { [ "${PROVIDER_KIND:-}" = ephemeral ]; }
+
+# Optional in the driver contract: hardware you own has no "capacity" to check.
+provider_capacity() { log "provider '$GPU_PROVIDER' has no capacity concept — the machine either exists or it does not"; return 0; }
 
 # ------------------------------------------------------------ portability
 #
