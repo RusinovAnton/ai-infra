@@ -43,6 +43,15 @@ indistinguishable from a slow boot: same pod status, same tailnet presence, same
 silence on the engine port. Pinning the image does not pin the flags the image
 accepts. Read the pod's own logs before assuming patience is the answer.
 
+**Follow-up that made it checkable for free:** `scripts/engine-preflight.sh`
+validates every flag against the pinned image before anything is rented. The
+non-obvious part: `--help` inside the image *also* dies without a GPU, because
+vLLM builds its parser by computing config defaults and that runs device
+inference. The flag names are dataclass fields though, and
+`dataclasses.fields()` never invokes a default factory — so the names extract
+cleanly on a laptop. Verified it flags `--disable-log-requests` as unknown and
+accepts the current set.
+
 ### Destroying a failed pod destroys the only evidence
 
 Twice the engine failed, and both times the diagnosis lived solely in the pod's

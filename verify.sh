@@ -227,6 +227,14 @@ for drv in scripts/providers/*.sh; do
   fi
 done
 
+# Flag-name drift against the pinned image is checked by
+# scripts/engine-preflight.sh — not here, because it needs the ~10 GB engine
+# image and a minute of emulated python. Run it after ANY change to engine
+# flags or the image digest, before gpu-up.sh. This check only asserts the
+# script exists and parses.
+bash -n scripts/engine-preflight.sh 2>/dev/null && ok "engine-preflight.sh present (run it before spending: validates flags against the pinned image)" \
+                                                || bad "scripts/engine-preflight.sh missing or broken"
+
 head_ "6. GPU node config cannot expose the engine publicly"
 G=gpu/docker-compose.yml
 if grep -qE '^\s*ports:' "$G"; then

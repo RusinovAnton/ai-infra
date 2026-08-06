@@ -188,6 +188,18 @@ curl -s https://gateway.<TAILNET>.ts.net/health/liveliness
 
 ## 4. GPU node
 
+**Before any launch, validate the engine flags for free:**
+
+```bash
+./scripts/engine-preflight.sh
+```
+
+It extracts the accepted flag list from the *pinned* engine image (no GPU
+needed) and checks every flag we pass. A renamed vLLM flag otherwise costs a
+GPU-hour: the engine exits 1, the platform restarts it forever, and the pod
+reads RUNNING throughout. Run it after any change to the engine flags or the
+image digest. First run pulls the image (~10 GB, once).
+
 **Pick a provider first.** `GPU_PROVIDER` in `scripts/.env` decides which
 hardware everything below talks to; nothing else in the setup changes.
 
