@@ -85,6 +85,21 @@ tailscale up \
 
 TS_IP="$(tailscale ip -4 || true)"
 [ -n "$TS_IP" ] || die "no tailnet IPv4 — join failed (auth key expired, or tag not pre-approved in tagOwners?)"
+
+# Leave the tailnet CLEANLY on shutdown. An ephemeral node is only reaped some
+# minutes after it goes offline, and until then it squats the MagicDNS name —
+# the next pod then joins as gpu-1, gpu-2, ... and the gateway must chase the
+# rename. `tailscale logout` removes an ephemeral node IMMEDIATELY, so the name
+# is free before gpu-up can possibly relaunch. The platform delivers SIGTERM to
+# PID 1 on pod delete, and PID 1 is this script (deliberately — see the engine
+# failure-reporting section below), so the trap actually fires.
+cleanup() {
+  log "shutting down: leaving the tailnet so the node name frees immediately"
+  [ -n "${ENGINE_PID:-}" ] && kill "$ENGINE_PID" 2>/dev/null || true
+  tailscale logout 2>/dev/null || true
+  exit 0
+}
+trap cleanup TERM INT
 if [ "$USERSPACE" = "1" ]; then VLLM_BIND_HOST=127.0.0.1; else VLLM_BIND_HOST="$TS_IP"; fi
 log "tailnet address ${TS_IP}; vLLM will bind ${VLLM_BIND_HOST}"
 
@@ -201,8 +216,13 @@ else
   # the gateway is allowed to reach. gpu-up.sh then reports the root cause in
   # seconds instead of polling for thirty minutes at $1/hr.
   set +e
-  python3 -m vllm.entrypoints.openai.api_server "${VLLM_ARGS[@]}" 2>&1 | tee /tmp/engine.log
-  rc=${PIPESTATUS[0]}
+  # Backgrounded + wait, rather than a plain foreground pipeline: bash only runs
+  # signal traps between commands, so a foreground vLLM would make the SIGTERM
+  # trap wait for the engine to exit on its own — precisely when it must not.
+  python3 -m vllm.entrypoints.openai.api_server "${VLLM_ARGS[@]}" > >(tee /tmp/engine.log) 2>&1 &
+  ENGINE_PID=$!
+  wait "$ENGINE_PID"
+  rc=$?
   set -e
 
   log "ENGINE EXITED rc=$rc — serving the failure on :8000 so it is visible from the gateway"

@@ -221,11 +221,14 @@ The node should have removed itself: the auth key is meant to be ephemeral,
 which deletes a node when it disconnects. It did not, which is worth checking on
 the key rather than assuming.
 
-**What changed.** `gpu-up.sh` now waits for a `tag:gpu` node to appear, reads its
-**actual** DNS name from the tailnet, and rewrites `ENGINE_API_BASE` plus
-recreates the gateway if it differs. It also warns when more than one online
-`tag:gpu` node exists. The logic is generic rather than provider-specific,
-because the failure belongs to Tailscale's naming, not to whoever rents the box.
+**What changed.** Two layers. `gpu-up.sh` reads the node's **actual** DNS name
+from the tailnet and rewrites `ENGINE_API_BASE` (plus recreates the gateway)
+when it differs — the safety net. And `provision.sh` now traps SIGTERM and runs
+`tailscale logout` before dying: logout removes an ephemeral node *immediately*
+instead of minutes later, so the name `gpu` is free before any relaunch can
+collide with it. The engine runs backgrounded behind a `wait` specifically so
+the trap can fire mid-flight — bash only runs traps between commands, so a
+foreground engine would have made the cleanup wait for the thing being killed.
 
 **The general lesson.** We treated a hostname as something we assign. It is
 something we *request* — the name authority is elsewhere and may hand back
