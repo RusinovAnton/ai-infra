@@ -8,7 +8,12 @@
 
 PROVIDER_KIND=ephemeral
 PROVIDER_INJECTS_SECRET=1
-PROVIDER_BILLS_IDLE="the weights volume still bills while no pod exists"
+# Only a network volume outlives the pod, and there is none by default.
+if [ -n "${RUNPOD_VOLUME_ID:-}" ]; then
+  PROVIDER_BILLS_IDLE="the weights volume still bills while no pod exists"
+else
+  PROVIDER_BILLS_IDLE="nothing persists, nothing bills"
+fi
 
 RP="${RUNPOD_API_BASE:-https://rest.runpod.io/v1}"
 
@@ -255,6 +260,13 @@ req = {
                            'set -e; echo \"\$PROVISION_B64\" | base64 -d > /provision.sh; exec bash /provision.sh'],
     'dockerStartCmd':     [],
     'env':                env,
+    # Host driver filter. Without it, placement is a lottery on driver age:
+    # torch refuses drivers older than its CUDA build -- 'The NVIDIA driver on
+    # your system is too old' -- the engine exits 1, and it presents as an
+    # inscrutable init failure. Four launches died on this. NOTE this comment
+    # sits inside a shell double-quoted string: a double quote here truncates
+    # the python source at that character.
+    'allowedCudaVersions': os.environ.get('RUNPOD_CUDA_VERSIONS','12.8,13.0').split(','),
     'interruptible':      False,
     'minVCPUPerGPU':      8,
     'minRAMPerGPU':       32,

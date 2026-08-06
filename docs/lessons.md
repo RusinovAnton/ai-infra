@@ -99,6 +99,29 @@ never calculated — a round number. Real need is ~35 GB for the checkpoint.
 *Measure the thing the optimisation is supposed to buy, before paying a
 recurring cost for it.*
 
+### Four init failures were the host's driver, not our config
+
+**What it looked like.** `EngineCore failed to start` with a wall of wrapper
+traceback, four launches in a row, across two GPU types. Suspects consumed in
+order: a retired flag (real, but separate), the multimodal profiling
+reservation, OOM.
+
+**What was true.** `RuntimeError: The NVIDIA driver on your system is too old
+(found version 12040)`. The pinned image's torch is a CUDA 12.8 build; RunPod
+was placing us on hosts with 12.4 drivers. The console's deploy form has a CUDA
+version picker — the API equivalent is `allowedCudaVersions`, which we never
+sent, so every API launch was a lottery on host driver age.
+
+**What changed.** The driver sends `allowedCudaVersions` (default `12.8,13.0`,
+override with `RUNPOD_CUDA_VERSIONS`). Found only because the failure endpoint's
+`error_lines` finally carried the EngineCore lines — the same error had been in
+the console logs of every previous failed pod, buried above the wrapper.
+
+**The general lesson.** Pinning the image pins *your* half of the contract. The
+host's driver is the other half, and on a rented fleet it varies per placement.
+If the provider's UI offers a filter, the API has the same knob — find it, set
+it, or your failures become nondeterministic.
+
 ### Capacity is a snapshot, not a property
 
 RTX 6000 Ada read `stock=Low` in US-IL-1 and `null` in the same region twenty

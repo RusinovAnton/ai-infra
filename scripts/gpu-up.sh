@@ -125,8 +125,13 @@ try: d = json.load(sys.stdin)
 except Exception: print(sys.stdin.read()[:2000]); raise SystemExit
 print('  exit code : %s' % d.get('exit_code'))
 print('  root cause: %s' % (d.get('root_cause') or '(none matched — see tail)'))
-print('  --- last lines ---')
-for l in (d.get('tail') or [])[-25:]: print('  ' + l)
+errs = d.get('error_lines') or []
+if errs:
+    print('  --- error lines ---')
+    for l in errs: print('  ' + l)
+else:
+    print('  --- last lines ---')
+    for l in (d.get('tail') or [])[-25:]: print('  ' + l)
 " >&2
     log ""
     log "the node is still billing. stop it with:  ./scripts/gpu-down.sh --force"
