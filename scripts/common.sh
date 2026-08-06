@@ -213,7 +213,13 @@ choose_gpu() {
 
 # The gateway's own API. Loopback on the host; a compose service name in the
 # container, where "localhost" is the container itself.
-GW="${GATEWAY_URL:-http://localhost:4000}"
+#
+# 127.0.0.1, never "localhost": macOS resolves localhost to ::1 first, and the
+# container publishes on IPv4 only — so any app listening on the IPv6 wildcard
+# (*:4000) silently intercepts every "localhost" request. It happened: a dev
+# server answered 404 to eighteen verify checks that then read as the gateway
+# being broken.
+GW="${GATEWAY_URL:-http://127.0.0.1:4000}"
 
 # macOS ships shasum, Debian ships sha256sum, and the scheduler image is Debian.
 sha256_hex() { # reads stdin, prints the hex digest

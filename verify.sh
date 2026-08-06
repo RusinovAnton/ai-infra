@@ -12,7 +12,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 REPO_ROOT="$PWD"
-GW=http://localhost:4000
+GW=http://127.0.0.1:4000
 
 DISRUPTIVE=0
 [ "${1:-}" = "--disruptive" ] && DISRUPTIVE=1
@@ -191,7 +191,9 @@ head_ "5b. Provider drivers are swappable"
 # The point of the driver layer is that changing GPU supplier is one line in
 # scripts/.env. That only holds while nothing outside providers/ names a
 # provider, so assert it rather than trusting it.
-leak=$(grep -rlniE 'runpod' scripts/*.sh 2>/dev/null | grep -v '/providers/' || true)
+# engine-preflight.sh is excluded: validating RUNPOD_CUDA_VERSIONS against the
+# image's torch build is the point of that script, so naming the var is not a leak.
+leak=$(grep -rlniE 'runpod' scripts/*.sh 2>/dev/null | grep -v '/providers/' | grep -v 'engine-preflight' || true)
 if [ -n "$leak" ]; then
   # common.sh may name the DEFAULT; anything else is coupling.
   leak=$(grep -rniE 'runpod' scripts/*.sh 2>/dev/null | grep -v '/providers/' \
@@ -281,9 +283,18 @@ done
 head_ "8. Gateway is not exposed beyond loopback"
 lan=$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
 if [ -n "$lan" ]; then
+  # Identity matters, not just an open port: another app on :4000 (a dev server
+  # on the IPv6 wildcard, say) answers here without exposing the GATEWAY at all.
+  # Only LiteLLM answering its own liveliness on the LAN is the spoofing risk.
+  lanbody=$(curl -s -m 5 "http://$lan:4000/health/liveliness" 2>/dev/null)
   c=$(curl -s -m 5 -o /dev/null -w "%{http_code}" "http://$lan:4000/health/liveliness" 2>/dev/null)
-  [ "$c" = "000" ] && ok ":4000 unreachable on the LAN address ($lan) — loopback bind holds" \
-                   || bad ":4000 answered $c on $lan — exposure beyond loopback makes Tailscale-User-Login spoofable"
+  if [ "$c" = "000" ]; then
+    ok ":4000 unreachable on the LAN address ($lan) — loopback bind holds"
+  elif printf '%s' "$lanbody" | grep -q "I'm alive!"; then
+    bad "LiteLLM itself answers on $lan:4000 — exposure beyond loopback makes Tailscale-User-Login spoofable"
+  else
+    ok ":4000 on $lan is answered by something that is NOT the gateway (a neighbour app) — loopback bind holds, but two apps share the port number"
+  fi
 else
   skip "no LAN address found to test loopback confinement against"
 fi

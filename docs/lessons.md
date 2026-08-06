@@ -296,6 +296,29 @@ prevent shutting something down.*
 
 ## Cost
 
+### `localhost` is two addresses, and the wrong one can be somebody else
+
+**What it looked like.** Eighteen verify failures at once: every gateway
+endpoint 404, models "got nothing", keys "not surviving", tool calls "broken" —
+minutes after all of them had passed by hand.
+
+**What was true.** A dev server on the same machine was listening on the IPv6
+wildcard (`*:4000`). macOS resolves `localhost` to `::1` first; the gateway
+container publishes on IPv4 `127.0.0.1` only. So every `localhost:4000` request
+went to the neighbour app, which answered 404 to everything. The gateway was
+healthy throughout, and the tailnet path — the one developers use — never
+noticed.
+
+**What changed.** Tooling talks to `127.0.0.1:4000`, never `localhost`. And the
+LAN-exposure check now verifies *identity* — only LiteLLM answering its own
+liveliness off-loopback is the spoofing risk; a neighbour app on the port
+number is a shared-port note, not an alarm.
+
+**The general lesson.** `localhost` is a name, not an address, and on dual-stack
+machines it is two of them. Any check that talks to a port by name can be
+silently intercepted by whichever process bound the other family first —
+eighteen coherent-looking failures traced to zero actual breakage.
+
 ### Nothing guards a host that is asleep
 
 cron does not fire while a machine sleeps and never catches up, so a closed lid
