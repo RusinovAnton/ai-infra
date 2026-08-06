@@ -113,14 +113,30 @@ return **empty** responses.
         "apiKey": "{env:OFFICE_LLM_KEY}"
       },
       "models": {
-        "coder":     { "name": "coder (fast)",       "tool_call": true },
-        "coder-max": { "name": "coder-max (thinking)", "tool_call": true }
+        "coder": {
+          "name": "coder (fast)",
+          "tool_call": true,
+          "limit": { "context": 65536, "output": 8192 }
+        },
+        "coder-max": {
+          "name": "coder-max (thinking)",
+          "tool_call": true,
+          "reasoning": true,
+          "interleaved": { "field": "reasoning_content" },
+          "limit": { "context": 65536, "output": 16384 }
+        }
       }
     }
   },
   "model": "office/coder"
 }
 ```
+
+Without the `limit` block opencode shows "Context: 0" and cannot manage its
+own context window; without `reasoning` + `interleaved` it hides `coder-max`'s
+thinking and reports "No reasoning" — the capability flags for a custom
+provider are declared here, not discovered. `coder-max` gets `output: 16384`
+because the thinking pass alone can exceed 8k tokens on a hard task (measured).
 
 opencode is the tool that will tell you the truth about tool calling — it surfaces
 a malformed `tool_calls` response as a failure instead of quietly showing you
