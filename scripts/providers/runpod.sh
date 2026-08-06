@@ -145,8 +145,21 @@ for x in v:
 }
 
 provider_create() {
-  : "${RUNPOD_VOLUME_ID:?set in scripts/.env — run ./gpu-up.sh --create-storage first}"
   : "${TS_AUTHKEY:?set in scripts/.env}"
+
+  # RUNPOD_VOLUME_ID is OPTIONAL, and empty is usually the better choice.
+  #
+  # A network volume bills 24/7 and pins the pod to ONE datacenter — and only
+  # 17 datacenters support volumes at all, which in practice excludes wherever
+  # the cheap 48 GB Ada cards currently have stock. What it buys is measured, not
+  # assumed: 35 GB of weights fetched in 34 s on a live pod, versus ~1 s from
+  # cache. Half a minute per cold start, against a monthly bill and a hard
+  # constraint on which GPUs you can rent.
+  #
+  # So: no volume by default. Weights land on container disk, sized below.
+  if [ -n "${RUNPOD_VOLUME_ID:-}" ]; then
+    log "using network volume $RUNPOD_VOLUME_ID (pins this pod to its datacenter)" >&2
+  fi
 
   # provision.sh travels in the pod's env, base64-encoded, so the node is built
   # from what is in Git rather than from a provider template that can drift.
@@ -164,9 +177,9 @@ env = {
     'MODEL_REVISION': os.environ['MODEL_REVISION'],
     'MAX_MODEL_LEN':  os.environ.get('MAX_MODEL_LEN','65536'),
     'TP':             os.environ.get('TP','1'),
-    'HF_HOME_HOST':   '/runpod-volume',
+    'HF_HOME_HOST':   '/runpod-volume' if os.environ.get('RUNPOD_VOLUME_ID','').strip() else '/root/.cache/huggingface',
 }
-print(json.dumps({
+req = {
     'name':               os.environ['NODE_NAME'],
     # SECURE, never COMMUNITY. The names are near-identical and the trust models
     # are opposite: on Community Cloud the host has root on your machine.
@@ -177,9 +190,6 @@ print(json.dumps({
     'gpuCount':           int(os.environ.get('GPU_COUNT','1')),
     'dataCenterIds':      os.environ['RUNPOD_DATACENTERS'].split(','),
     'dataCenterPriority': 'custom',
-    'networkVolumeId':    os.environ['RUNPOD_VOLUME_ID'],
-    'volumeMountPath':    '/runpod-volume',
-    'containerDiskInGb':  60,
     'imageName':          os.environ['ENGINE_IMAGE'],
     # No published ports and no public IP. Reachability comes from the tailnet
     # only; the engine socket does not exist on any public interface.
@@ -194,7 +204,20 @@ print(json.dumps({
     'interruptible':      False,
     'minVCPUPerGPU':      8,
     'minRAMPerGPU':       32,
-}, indent=2))
+}
+
+vol = os.environ.get('RUNPOD_VOLUME_ID','').strip()
+if vol:
+    req['networkVolumeId']   = vol
+    req['volumeMountPath']   = '/runpod-volume'
+    req['containerDiskInGb'] = 60
+else:
+    # No volume: the weights live on container disk, so it must hold the image
+    # plus the checkpoint plus room to unpack. Container disk is billed only
+    # while the pod exists, unlike a network volume.
+    req['containerDiskInGb'] = int(os.environ.get('RUNPOD_DISK_GB','120'))
+
+print(json.dumps(req, indent=2))
 ")"
 
   if [ "${MODE:-run}" = dry ]; then
