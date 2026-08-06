@@ -210,16 +210,24 @@ try:
 except OSError:
     lines = []
 
-# The wrapper traceback is never the cause. vLLM says "See root cause above",
-# so surface the FIRST real error line, not the last — the last is the wrapper.
-pat = re.compile(r"(Error|ERROR|error:|Exception|OutOfMemory|CUDA|assert)", re.I)
-noise = re.compile(r"raise |Traceback|self\.|return |\^\^\^|File \"")
-cause = next((l.strip() for l in lines if pat.search(l) and not noise.search(l)), "")
+# The wrapper traceback is never the cause — vLLM says "See root cause above".
+# Surface the FIRST error-level line. Lessons from a live misfire: "CUDA" as a
+# pattern matches `device_config=cuda` inside a giant INFO config line, so
+# INFO/DEBUG/WARNING lines are excluded outright, and the pattern requires an
+# actual error shape rather than a hardware word.
+pat   = re.compile(r"\b[A-Za-z]+Error\b|\bERROR\b|error:|Exception:|OutOfMemory|out of memory|assert(ion)? ?failed", re.I)
+info  = re.compile(r"\b(INFO|DEBUG|WARNING)\b")
+noise = re.compile(r"raise |Traceback|self\.|return |\^\^\^|File \"|See root cause above")
+errs  = [l.strip() for l in lines if pat.search(l) and not info.search(l) and not noise.search(l)]
+cause = errs[0] if errs else ""
 
 body = json.dumps({
     "error": "engine_failed_to_start",
     "exit_code": rc,
     "root_cause": cause,
+    # Every error-shaped line, not just the first: the EngineCore's real error
+    # sits far above the APIServer wrapper, outside any fixed-size tail.
+    "error_lines": errs[:20],
     "tail": lines[-40:],
     "hint": "the engine process exited; this is not a slow cold start",
 }, indent=2).encode()

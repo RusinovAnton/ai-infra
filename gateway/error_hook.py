@@ -61,6 +61,21 @@ class EngineDownHandler(CustomLogger):
         self, request_data, original_exception, user_api_key_dict, traceback_str=None
     ):
         text = f"{type(original_exception).__name__} {original_exception}".lower()
+        # The node's failure endpoint (provision.sh) answers 503 with a full
+        # diagnostic body when vLLM has died. LiteLLM relays that upstream body
+        # into the exception text — tracebacks, engine config, all of it. That
+        # is operator material: log it verbatim here, and hand the developer
+        # the same calm message as any other outage. Matched FIRST, because it
+        # also contains none of the connection-error needles below.
+        if "engine_failed_to_start" in text:
+            print(f"[engine-down] engine process died on the node; diagnostic from the failure endpoint follows", flush=True)
+            print(f"[engine-down] {original_exception}", flush=True)
+            print(f"[engine-down] {_OPERATOR_LOG}", flush=True)
+            raise HTTPException(
+                status_code=503,
+                detail={"error": {"message": _MESSAGE, "type": "engine_unavailable"}},
+                headers={"Retry-After": "300"},
+            )
         if any(needle in text for needle in _UNREACHABLE):
             # stdout -> `docker compose logs litellm`. The operator detail goes
             # here, where only operators can read it.
