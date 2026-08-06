@@ -52,13 +52,41 @@ print('' if v is None else v)
 
 provider_storage() {
   local dc="${RUNPOD_DATACENTERS%%,*}"
+
+  # Idempotent, because it is not: a second run creates a SECOND 200 GB volume
+  # that bills 24/7 forever and is indistinguishable from the first. There is no
+  # error to notice — you find out on the invoice. Creating storage is the one
+  # operation here where "run it again" is expensive rather than harmless.
+  local existing
+  existing="$(rp GET /networkvolumes | python3 -c "
+import sys,json
+try: v=json.load(sys.stdin)
+except Exception: sys.exit(0)
+v = v if isinstance(v,list) else v.get('data',[])
+for x in v:
+    if x.get('name')=='ai-infra-weights':
+        print('%s %s' % (x.get('id'), x.get('dataCenterId')))
+" 2>/dev/null || true)"
+  if [ -n "$existing" ]; then
+    log "a volume named ai-infra-weights already exists — NOT creating another:"
+    printf '%s\n' "$existing" | while read -r id vdc; do log "  $id in $vdc"; done
+    log "put its id in scripts/.env as RUNPOD_VOLUME_ID, or delete it first if you want a new one"
+    return 0
+  fi
+
   log "creating a 200 GB network volume in $dc"
   # Sized for the primary (~35 GB) plus the 27B A/B (~54 GB). Pinned to one
   # datacenter and billing continuously — see docs/devops-setup.md §4.3 for why
   # you may not want one at all outside a measurement phase.
-  rp POST /networkvolumes "$(python3 -c "
-import json;print(json.dumps({'name':'ai-infra-weights','dataCenterId':'$dc','size':200}))")" \
-    | python3 -m json.tool
+  # Built with printf, not an inline python dict. `{'a':1,'b':2}` contains no
+  # spaces, so bash BRACE-EXPANDS it into three words before python ever sees
+  # it — the request then goes out with an empty body and the provider replies
+  # about a missing content type, which points nowhere near the cause. The
+  # larger request in provider_create escapes this only because its braces
+  # contain newlines.
+  local body
+  body="$(printf '{"name":"ai-infra-weights","dataCenterId":"%s","size":%d}' "$dc" 200)"
+  rp POST /networkvolumes "$body" | python3 -m json.tool
   log "put the returned id in scripts/.env as RUNPOD_VOLUME_ID"
 }
 

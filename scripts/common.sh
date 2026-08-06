@@ -40,18 +40,24 @@ load_env() {
 
   : "${PROVIDER_KIND:?driver $GPU_PROVIDER must set PROVIDER_KIND}"
 
-  # A placeholder is not a value. `${VAR:?}` only catches empty or unset, so an
-  # untouched CHANGE-ME sails through every guard and fails much later, as a
-  # provider API error about an id that never existed.
-  local stale
-  stale="$(grep -lE '^[A-Z_]+=CHANGE-ME[[:space:]]*$' "$SCRIPTS_DIR/.env" "$GATEWAY_DIR/.env" 2>/dev/null || true)"
-  if [ -n "$stale" ]; then
-    local names
-    names="$(grep -hE '^[A-Z_]+=CHANGE-ME[[:space:]]*$' "$SCRIPTS_DIR/.env" "$GATEWAY_DIR/.env" 2>/dev/null | cut -d= -f1 | tr '\n' ' ')"
-    die "unfilled placeholder(s): ${names}— set them in scripts/.env (or gateway/.env) before running this"
-  fi
-
   provider_preflight
+}
+
+# A placeholder is not a value. `${VAR:?}` only catches empty or unset, so an
+# untouched CHANGE-ME sails through every guard and fails much later, as a
+# provider API error about an id that never existed.
+#
+# Deliberately NOT called from load_env, for two reasons that both bite:
+#   - `gpu-up.sh --create-storage` exists to PRODUCE the value that is still a
+#     placeholder. Guarding it there makes the fix unreachable.
+#   - gpu-down.sh and idle-check.sh must never be blocked by configuration.
+#     Refusing to stop a running node because some unrelated field is unfilled
+#     turns a cosmetic problem into an unbounded bill.
+# So only the paths that CREATE something call this.
+check_placeholders() {
+  local names
+  names="$(grep -hE '^[A-Z_]+=CHANGE-ME[[:space:]]*$' "$SCRIPTS_DIR/.env" "$GATEWAY_DIR/.env" 2>/dev/null | cut -d= -f1 | tr '\n' ' ')"
+  [ -z "$names" ] || die "unfilled placeholder(s): ${names}— set them in scripts/.env (or gateway/.env) before running this"
 }
 
 # A node that costs money by the hour should be destroyed when idle; one you own

@@ -29,6 +29,11 @@ if [ "$MODE" = storage ]; then
   exit 0
 fi
 
+# Everything below creates something, so the config must be complete. The
+# storage branch above deliberately runs before this: it is how you fill in the
+# value this check demands.
+check_placeholders
+
 # ------------------------------------------------------------ idempotence
 
 existing="$(provider_find || true)"
