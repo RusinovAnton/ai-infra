@@ -145,7 +145,7 @@ VLLM_ARGS=(
   --port 8000
   --tensor-parallel-size "$TP"
   --max-model-len "$MAX_MODEL_LEN"
-  --gpu-memory-utilization 0.90       # fraction of the WHOLE card, not of what remains
+  --gpu-memory-utilization "${GPU_MEM_UTIL:-0.90}"   # fraction of the WHOLE card, not of what remains
   --api-key "$ENGINE_SECRET"          # defence in depth; the ACL is the real control
   --no-enable-log-requests            # no prompts on disk, on hardware we do not own
                                       # (was --disable-log-requests; vLLM renamed it to a
@@ -157,6 +157,22 @@ VLLM_ARGS=(
   --reasoning-parser qwen3            # required even on the non-thinking alias
 )
 
+# Every checkpoint in this family is a vision-language model, and vLLM profiles
+# multimodal memory using a dummy image at MAXIMUM resolution. That reservation
+# lands directly against KV cache and can exceed the vision tower's own weights,
+# so on a 48 GB card it is a plausible cause of "engine core initialization
+# failed" with no obvious culprit.
+#
+# We never send images. Setting this to zero reclaims the reservation.
+# Off by default because it can affect whether the chat template applies
+# cleanly — verify a normal completion after enabling it.
+#
+#   VLLM_LIMIT_MM='{"image":0,"video":0}' ./scripts/gpu-up.sh
+if [ -n "${VLLM_LIMIT_MM:-}" ]; then
+  log "limiting multimodal inputs: $VLLM_LIMIT_MM"
+  VLLM_ARGS+=( --limit-mm-per-prompt "$VLLM_LIMIT_MM" )
+fi
+
 if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
   log "docker present — starting vLLM via compose"
   cd "$(dirname "$0")"
@@ -166,9 +182,62 @@ if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
     docker compose up -d
   log "vLLM starting under compose. Readiness is /v1/models -> 200, NOT tag:gpu online."
 else
-  log "no docker (container-per-pod provider) — exec'ing vLLM in the foreground"
+  log "no docker (container-per-pod provider) — running vLLM in the foreground"
   log "readiness is /v1/models -> 200, NOT tag:gpu appearing online"
-  # exec so vLLM is PID 1's child and the pod dies with the engine rather than
-  # sitting alive with nothing listening.
-  exec python3 -m vllm.entrypoints.openai.api_server "${VLLM_ARGS[@]}"
+
+  # NOT exec. The engine's exit code is the most valuable diagnostic this system
+  # produces, and exec'ing throws it away: vLLM becomes PID 1, dies, the platform
+  # restarts the container, and the operator sees an endless "starting" that is
+  # indistinguishable from a slow load. Twice now that has cost a GPU-hour and
+  # the evidence, because destroying the pod also destroys its logs.
+  #
+  # So: keep the output, and if the engine dies, SERVE the reason on the one port
+  # the gateway is allowed to reach. gpu-up.sh then reports the root cause in
+  # seconds instead of polling for thirty minutes at $1/hr.
+  set +e
+  python3 -m vllm.entrypoints.openai.api_server "${VLLM_ARGS[@]}" 2>&1 | tee /tmp/engine.log
+  rc=${PIPESTATUS[0]}
+  set -e
+
+  log "ENGINE EXITED rc=$rc — serving the failure on :8000 so it is visible from the gateway"
+  RC="$rc" python3 - <<'PYEOF'
+import json, os, re
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+rc = os.environ.get("RC", "?")
+try:
+    lines = open("/tmp/engine.log", errors="replace").read().splitlines()
+except OSError:
+    lines = []
+
+# The wrapper traceback is never the cause. vLLM says "See root cause above",
+# so surface the FIRST real error line, not the last — the last is the wrapper.
+pat = re.compile(r"(Error|ERROR|error:|Exception|OutOfMemory|CUDA|assert)", re.I)
+noise = re.compile(r"raise |Traceback|self\.|return |\^\^\^|File \"")
+cause = next((l.strip() for l in lines if pat.search(l) and not noise.search(l)), "")
+
+body = json.dumps({
+    "error": "engine_failed_to_start",
+    "exit_code": rc,
+    "root_cause": cause,
+    "tail": lines[-40:],
+    "hint": "the engine process exited; this is not a slow cold start",
+}, indent=2).encode()
+
+class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *a): pass
+    def do_GET(self):  self._send()
+    def do_POST(self): self._send()
+    def _send(self):
+        self.send_response(503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("X-Engine-Failed", "1")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+print("[provision] failure endpoint listening on %s:8000" % os.environ.get("VLLM_BIND_HOST", "0.0.0.0"), flush=True)
+ThreadingHTTPServer((os.environ.get("VLLM_BIND_HOST") or "0.0.0.0", 8000), H).serve_forever()
+PYEOF
 fi

@@ -290,6 +290,20 @@ sync_engine_host() {
 # The engine, reached the only way anything is allowed to reach it.
 engine_base() { printf '%s' "${ENGINE_API_BASE%/v1}"; }
 
+# Did the engine die and leave an explanation on :8000? provision.sh serves a
+# 503 with X-Engine-Failed when vLLM exits, so a dead engine is distinguishable
+# from one still loading — which is the whole difference between "wait" and
+# "stop paying".
+engine_failed_detail() {
+  # No -f: it suppresses the body on 5xx, and the body IS the diagnosis.
+  local h b rc=1
+  h="$(mktemp)"; b="$(mktemp)"
+  curl -sS -m 8 -D "$h" -o "$b" "$(engine_base)/v1/models" >/dev/null 2>&1
+  if grep -qi '^x-engine-failed:' "$h" 2>/dev/null && [ -s "$b" ]; then cat "$b"; rc=0; fi
+  rm -f "$h" "$b"
+  return $rc
+}
+
 engine_ready() {
   curl -fsS -m 10 -o /dev/null \
     -H "Authorization: Bearer ${ENGINE_SECRET:-}" \

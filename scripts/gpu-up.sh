@@ -114,6 +114,24 @@ sync_engine_host
 log "waiting for the engine at $(engine_base) (cold start is minutes, not seconds)"
 deadline=$(( $(date +%s) + 1800 ))
 until engine_ready 2>/dev/null; do
+  # Fail fast on a dead engine rather than waiting out the full timeout at
+  # roughly a dollar an hour.
+  if detail="$(engine_failed_detail 2>/dev/null)"; then
+    printf '\n'
+    log "THE ENGINE DIED — this is not a slow cold start."
+    printf '%s\n' "$detail" | python3 -c "
+import sys, json
+try: d = json.load(sys.stdin)
+except Exception: print(sys.stdin.read()[:2000]); raise SystemExit
+print('  exit code : %s' % d.get('exit_code'))
+print('  root cause: %s' % (d.get('root_cause') or '(none matched — see tail)'))
+print('  --- last lines ---')
+for l in (d.get('tail') or [])[-25:]: print('  ' + l)
+" >&2
+    log ""
+    log "the node is still billing. stop it with:  ./scripts/gpu-down.sh --force"
+    die "engine failed to start"
+  fi
   if [ "$(date +%s)" -ge "$deadline" ]; then
     log "engine did not answer within 30 min. Check, in this order:"
     log "  1. tailscale status        — is the node online and 'direct', not 'relay'?"

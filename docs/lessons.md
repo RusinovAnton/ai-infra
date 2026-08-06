@@ -43,6 +43,31 @@ indistinguishable from a slow boot: same pod status, same tailnet presence, same
 silence on the engine port. Pinning the image does not pin the flags the image
 accepts. Read the pod's own logs before assuming patience is the answer.
 
+### Destroying a failed pod destroys the only evidence
+
+Twice the engine failed, and both times the diagnosis lived solely in the pod's
+console log. Delete the pod — the obvious thing to do when it is billing and
+broken — and the log goes with it. The second time, the root cause was gone
+before it was read, leaving a choice between guessing at a fix and paying for
+another attempt to reproduce it.
+
+The provider offers no log API either: every REST path for pod logs 400s.
+
+**What changed.** `gpu/provision.sh` no longer `exec`s vLLM. It keeps the exit
+code, tees the output, and if the engine dies it serves the failure as a `503`
+with `X-Engine-Failed` on `:8000` — the one port the gateway is allowed to reach.
+`gpu-up.sh` polls for that and aborts in seconds with the root cause, instead of
+waiting out a 30-minute timeout at roughly a dollar an hour.
+
+It surfaces the **first** matching error rather than the last, because vLLM's
+final line is the wrapper — `Engine core initialization failed. See root cause
+above.` The line you need is above, which is exactly the part a tail loses.
+
+**The general lesson.** On rented hardware the diagnosis has a shorter lifetime
+than the fix. Anything that can only be read from a live machine must be pushed
+somewhere durable *before* the machine is destroyed — and shutting down to stop
+the bleeding is the moment you are most likely to lose it.
+
 ### The weights volume made the launch impossible, not faster
 
 **What it looked like.** `create pod: get attached volume: network volume not
