@@ -74,25 +74,25 @@ provider_preflight() {
 # we are serving, not of this provider, so it lives in common.sh.
 #
 # Format, one offer per line, tab-separated:
-#   <id>  <vram_gb>  <price_per_hr>  <stock>  <location>
+#   <id>  <vram_gb>  <price_per_hr>  <stock>  <vendor>  <location>
 provider_offers() {
   local ids id out st pr mem
   ids="$(curl -sS -m 30 -X POST "$RP_GQL" \
       -H "Authorization: Bearer $RUNPOD_API_KEY" -H 'Content-Type: application/json' \
-      -d '{"query":"query { gpuTypes { id memoryInGb } }"}' 2>/dev/null | python3 -c "
+      -d '{"query":"query { gpuTypes { id memoryInGb manufacturer } }"}' 2>/dev/null | python3 -c "
 import sys, json
 try: gs = json.load(sys.stdin)['data']['gpuTypes']
 except Exception: raise SystemExit
 for g in gs:
-    print('%s\t%s' % (g.get('id') or '', g.get('memoryInGb') or 0))
+    print('%s\t%s\t%s' % (g.get('id') or '', g.get('memoryInGb') or 0, g.get('manufacturer') or ''))
 " 2>/dev/null || true)"
 
-  while IFS="$(printf '\t')" read -r id mem; do
+  while IFS="$(printf '\t')" read -r id mem vendor; do
     [ -n "$id" ] || continue
     out="$(rp_stock_global "$id")"
     st="${out%% *}"; pr="${out##* }"
     case "$st" in None|unknown) continue ;; esac
-    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$mem" "$pr" "$st" "${RUNPOD_DATACENTERS%%,*}+"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$mem" "$pr" "$st" "$vendor" "${RUNPOD_DATACENTERS%%,*}+"
   done <<EOF
 $ids
 EOF

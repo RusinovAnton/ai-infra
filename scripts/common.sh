@@ -86,31 +86,70 @@ provider_offers() { :; }
 #   - GPU_MIN_VRAM_GB on ONE card. The FP8 checkpoint is ~35 GB; splitting it
 #     across smaller cards needs tensor parallelism, and consumer cards have no
 #     NVLink, so TP crosses PCIe and costs more than the cheaper rate saves.
-#   - FP8 tensor cores, i.e. Ada or newer. Ampere (A100/A40/A6000) has the VRAM
-#     and would serve this checkpoint WITHOUT ERRORING, just far slower. That is
-#     the worst failure mode available, so those are excluded by name.
-#   - CUDA: the pinned engine image is not ROCm, so AMD is excluded.
+#   - FP8 tensor cores. Ampere (A100/A40/A6000) has the VRAM and would serve this
+#     checkpoint WITHOUT ERRORING, just far slower — the worst failure mode
+#     available, since nothing tells you it happened.
+#   - CUDA: the pinned engine image is not ROCm, so AMD is excluded by vendor.
+#
+# ⚠️ FP8 support is NOT knowable from the provider. There is no compute-capability
+# field (cudaCores reads 0 for every card), so this matches ARCHITECTURE NAMES,
+# which is a heuristic dressed as a rule.
+#
+# It is therefore an ALLOWLIST, not a denylist, and that direction is the whole
+# point: an unrecognised card is excluded rather than silently rented. A denylist
+# would have to predict every future Ampere-class part, and would fail by
+# renting one — the failure you cannot see. This fails by not renting something
+# you could have, which you find out immediately.
+#
+# FP8 tensor cores start at compute capability 8.9: Ada, Hopper, Blackwell.
+# Add a family here when a new one ships; the list is meant to be edited.
 GPU_MIN_VRAM_GB="${GPU_MIN_VRAM_GB:-48}"
-GPU_EXCLUDE="${GPU_EXCLUDE:-A100|A40|A6000|A5000|A4000|V100|T4|MI300|MI250|RTX 3}"
+# L40/L40S are Ada (AD102) but carry no "Ada" in their names — the first version
+# of this list excluded them, which is exactly the false negative an allowlist
+# produces and why gpu_rejected() prints what was dropped.
+GPU_FP8_FAMILIES="${GPU_FP8_FAMILIES:-Ada|Blackwell|L40|H100|H200|H800|B200|B300|GB200|GB300|RTX 40|RTX 50}"
 
 # Suitable offers, cheapest first.
 gpu_shortlist() {
-  provider_offers | MINV="$GPU_MIN_VRAM_GB" EXCL="$GPU_EXCLUDE" MAXP="${GPU_MAX_PRICE:-}" python3 -c "
+  provider_offers | MINV="$GPU_MIN_VRAM_GB" FAM="$GPU_FP8_FAMILIES" MAXP="${GPU_MAX_PRICE:-}" python3 -c "
 import sys, os, re
-minv = float(os.environ['MINV']); excl = re.compile(os.environ['EXCL'])
+minv = float(os.environ['MINV']); fam = re.compile(os.environ['FAM'])
 maxp = float(os.environ['MAXP']) if os.environ.get('MAXP') else None
 rows = []
 for line in sys.stdin:
     f = line.rstrip('\n').split('\t')
     if len(f) < 4: continue
     gid, mem, price, stock = f[0], f[1], f[2], f[3]
+    vendor = f[4] if len(f) > 4 else ''
+    where  = f[5] if len(f) > 5 else ''
     try: mem = float(mem); price = float(price)
     except ValueError: continue
-    if mem < minv or excl.search(gid): continue
+    if mem < minv: continue
+    if vendor and vendor.lower() not in ('nvidia',): continue   # engine image is CUDA
+    if not fam.search(gid): continue                            # allowlist: unknown -> excluded
     if maxp is not None and price > maxp: continue
-    rows.append((price, gid, mem, stock, f[4] if len(f) > 4 else ''))
+    rows.append((price, gid, mem, stock, where))
 for price, gid, mem, stock, where in sorted(rows):
     print('%s\t%g\t%s\t%s\t%s' % (gid, mem, price, stock, where))
+"
+}
+
+# What the allowlist threw away, so a card missing from it is discoverable rather
+# than invisible. An unrecognised new architecture shows up here, not nowhere.
+gpu_rejected() {
+  provider_offers | MINV="$GPU_MIN_VRAM_GB" FAM="$GPU_FP8_FAMILIES" python3 -c "
+import sys, os, re
+minv = float(os.environ['MINV']); fam = re.compile(os.environ['FAM'])
+for line in sys.stdin:
+    f = line.rstrip('\n').split('\t')
+    if len(f) < 4: continue
+    gid, mem = f[0], f[1]
+    vendor = f[4] if len(f) > 4 else ''
+    try: mem = float(mem)
+    except ValueError: continue
+    if mem < minv: continue
+    if vendor and vendor.lower() != 'nvidia': print('%s\t%s' % (gid, 'not CUDA'))
+    elif not fam.search(gid):                 print('%s\t%s' % (gid, 'no known FP8 support'))
 "
 }
 
@@ -124,6 +163,17 @@ show_offers() {
 $(gpu_shortlist)
 EOF
   [ "$n" = 0 ] && log "  (nothing — lower GPU_MIN_VRAM_GB, raise GPU_MAX_PRICE, or wait)"
+
+  local rid rwhy any=0
+  while IFS="$(printf '\t')" read -r rid rwhy; do
+    [ -n "$rid" ] || continue
+    [ "$any" = 0 ] && { log "excluded, big enough but unsuitable:"; any=1; }
+    log "  - $rid ($rwhy)"
+  done <<EOF
+$(gpu_rejected)
+EOF
+  [ "$any" = 1 ] && log "  FP8 support is matched by architecture name (GPU_FP8_FAMILIES) — the"
+  [ "$any" = 1 ] && log "  provider exposes no capability field. Add a family there if one is missing."
   return 0
 }
 
