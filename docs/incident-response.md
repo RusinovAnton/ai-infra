@@ -54,7 +54,7 @@ Know this before an incident, because you cannot retrofit it during one.
 **You do not have, by design:**
 
 - **Prompt or response content.** `turn_off_message_logging: true` on the gateway
-  and `--disable-log-requests` on the engine. You cannot answer "what did they
+  and `--no-enable-log-requests` on the engine. You cannot answer "what did they
   ask the model."
 - **Shell history on the GPU node.** `--ssh=false`, and the node is destroyed.
 - **Anything from a destroyed pod.** `gpu-down.sh` deletes it. If you need the

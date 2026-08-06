@@ -236,8 +236,16 @@ else
 fi
 grep -q 'network_mode: host' "$G" && ok "host networking (no NAT; vLLM binds the tailnet address directly)" \
                                   || bad "no host networking — the gateway could not reach vLLM without publishing a port"
-grep -q -- '--disable-log-requests' "$G" && ok "--disable-log-requests (no prompts on disk we do not own)" \
-                                         || bad "missing --disable-log-requests"
+# Accept either spelling: vLLM renamed --disable-log-requests to
+# --no-enable-log-requests, and passing the retired one is FATAL (argparse exits
+# 1, the container restarts forever, and the pod still reports RUNNING).
+if grep -qE -- '--no-enable-log-requests' "$G"; then
+  ok "--no-enable-log-requests (no prompts on disk we do not own)"
+elif grep -qE -- '--disable-log-requests' "$G"; then
+  bad "--disable-log-requests is the retired spelling — vLLM exits 1 on it; use --no-enable-log-requests"
+else
+  bad "request logging is not disabled — prompts would land on hardware we do not own"
+fi
 grep -q -- '--tool-call-parser=qwen3_coder' "$G" && ok "tool-call parser is qwen3_coder, not hermes" \
                                                  || bad "wrong or missing tool-call parser — agents get prose instead of tool_calls, silently"
 grep -q -- '--reasoning-parser=qwen3' "$G" && ok "reasoning parser present (required even on the non-thinking alias)" \

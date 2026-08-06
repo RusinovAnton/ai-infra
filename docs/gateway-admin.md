@@ -206,7 +206,7 @@ WHERE "startTime" > now() - interval '1 day' AND status != 'success' GROUP BY 1;
 
 `turn_off_message_logging: true` means **no prompt or response content is
 stored**, anywhere, on either machine (the engine also runs
-`--disable-log-requests`). You can see who called what, when, and how many
+`--no-enable-log-requests`). You can see who called what, when, and how many
 tokens. You cannot see what they asked.
 
 That is the intended trade and it has a cost: during an incident you cannot

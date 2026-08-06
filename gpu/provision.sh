@@ -147,7 +147,11 @@ VLLM_ARGS=(
   --max-model-len "$MAX_MODEL_LEN"
   --gpu-memory-utilization 0.90       # fraction of the WHOLE card, not of what remains
   --api-key "$ENGINE_SECRET"          # defence in depth; the ACL is the real control
-  --disable-log-requests              # no prompts on disk, on hardware we do not own
+  --no-enable-log-requests            # no prompts on disk, on hardware we do not own
+                                      # (was --disable-log-requests; vLLM renamed it to a
+                                      #  --enable/--no-enable pair, and an unknown flag is
+                                      #  fatal: argparse exits 1, so the container restarts
+                                      #  forever while the pod still reports RUNNING)
   --enable-auto-tool-choice
   --tool-call-parser qwen3_coder      # NOT hermes — wrong parser returns prose, silently
   --reasoning-parser qwen3            # required even on the non-thinking alias
