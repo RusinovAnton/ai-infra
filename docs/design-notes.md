@@ -117,6 +117,29 @@ costs minutes and a wrong deletion costs a rebuild. `verify.sh` greps persistent
 drivers for destructive calls, because that asymmetry is the one bug in this
 layer you cannot undo.
 
+## First measured numbers (2026-08-06, 1 × L40S, FP8, 65k ctx, max_num_seqs=64)
+
+Everything before this line in the throughput story was arithmetic. These are
+measured through the full developer path (tailnet → serve → LiteLLM → engine),
+with `scripts/bench.sh`:
+
+- **Single stream:** TTFT 0.25–0.42 s, decode 65–106 tok/s. The bandwidth
+  arithmetic said "MoE should reach 100+"; it does.
+- **The design's exit criterion — 5 concurrent ~6k-token prompts:**
+  TTFT median 5.1 s, **p95 7.98 s → FAIL** against the <5 s bar. Zero
+  preemptions, so KV cache is not the limit — **prefill is**. Per-stream decode
+  stayed at 36–60 tok/s.
+- **Thinking tier:** on a trivial prompt, `coder-max` produced 2048 tokens of
+  pure reasoning in ~20 s without reaching an answer. Clients calling it with
+  small `max_tokens` see "empty" responses (`finish_reason: length`).
+
+Caveat before acting on the FAIL: the bench fires all five prompts in the same
+instant, the strictest reading of "5 concurrent streams". Five humans behave
+more like Poisson arrivals; simultaneous 6k-token prefills are the worst case.
+The letter of the criterion says steady state needs the second GPU — but the
+honest next step is the measurement week's real-corpus run, plus a view on how
+often five developers actually collide.
+
 ## Accepted risks
 
 **The host operator can read prompts.** Inference decrypts in RAM and VRAM, and no
