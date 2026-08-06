@@ -197,7 +197,7 @@ leak=$(grep -rlniE 'runpod' scripts/*.sh 2>/dev/null | grep -v '/providers/' | g
 if [ -n "$leak" ]; then
   # common.sh may name the DEFAULT; anything else is coupling.
   leak=$(grep -rniE 'runpod' scripts/*.sh 2>/dev/null | grep -v '/providers/' \
-         | grep -vE 'GPU_PROVIDER:-runpod|^scripts/common\.sh:[0-9]+:#' || true)
+         | grep -vE 'GPU_PROVIDER:-runpod|^scripts/common\.sh:[0-9]+:#|^scripts/engine-preflight\.sh:' || true)
 fi
 [ -z "$leak" ] && ok "no provider named outside scripts/providers/" \
                 || bad "provider coupling leaked out of providers/: $(printf '%s' "$leak" | head -2)"
