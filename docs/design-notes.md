@@ -154,6 +154,10 @@ office server means re-issuing every key.
 convenient moment, and the network volume's datacenter pinning limits how usefully
 you can fall back.
 
+Operational failures found by *running* the system — crash loops, provider
+capacity, shell traps — are in [lessons.md](lessons.md) instead. The split is:
+this file is what we decided and why; that one is what the system did to us.
+
 ## Rough edges found by verification
 
 Real, unfixed, and worth knowing before they confuse someone:

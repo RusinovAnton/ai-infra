@@ -29,6 +29,7 @@ tasks, not on code — see [docs/devops-setup.md](docs/devops-setup.md).
 | **Writing code against it** | [docs/developer-guide.md](docs/developer-guide.md) — agent-agnostic, plus opencode / aider / Claude Code / VS Code / JetBrains |
 | **Handling a compromise or a runaway bill** | [docs/incident-response.md](docs/incident-response.md) — kill switch first |
 | **Changing GPU supplier, or moving to your own hardware** | [scripts/providers/README.md](scripts/providers/README.md) — the driver contract and the three shipped drivers |
+| **Something is behaving oddly, or you want the war stories** | [docs/lessons.md](docs/lessons.md) — what running this actually taught us, symptom first |
 | **About to change something structural** | [docs/design-notes.md](docs/design-notes.md) — deliberate omissions, corrected assumptions, accepted risks |
 
 Beliefs that turned out to be wrong during the build are recorded in
@@ -57,6 +58,7 @@ scripts/  gpu-up.sh gpu-down.sh   provider-agnostic lifecycle; drain before down
           common.sh               shared helpers, credential loading
 verify.sh                         ~85 checks; GPU/tailnet ones skip cleanly
 docs/                             per-role documentation (table above)
+          lessons.md              symptom -> cause -> fix, from real incidents
 ```
 
 ## Quick start
