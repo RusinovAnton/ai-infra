@@ -217,9 +217,11 @@ in use, so the new node joined as **`gpu-1`**. The gateway went on resolving
 `gpu`, which pointed at a machine that no longer existed. Every symptom read as
 "the engine never started".
 
-The node should have removed itself: the auth key is meant to be ephemeral,
-which deletes a node when it disconnects. It did not, which is worth checking on
-the key rather than assuming.
+The key was initially suspected (ephemeral nodes are supposed to self-remove),
+but the tailnet's audit log later exonerated it: "Tailscale service: remove
+ephemeral node" fired for every ghost — **roughly an hour** after each went
+offline. Ephemeral means *eventually reaped*, not *promptly reaped*, and any
+relaunch inside that window collides with the corpse and gets renamed.
 
 **What changed.** Two layers. `gpu-up.sh` reads the node's **actual** DNS name
 from the tailnet and rewrites `ENGINE_API_BASE` (plus recreates the gateway)
