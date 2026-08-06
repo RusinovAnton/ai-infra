@@ -209,9 +209,10 @@ Real, unfixed, and worth knowing before they confuse someone:
   during wiring or bursty use. Supporting a volume-less launch needs the weights
   pointed at container disk and `containerDiskInGb` re-sized, which is a real
   change rather than a config tweak.
-- **`idle-check.sh`'s DB-failure fail-safe and `gpu-down.sh`'s drain loop are
-  unexercised.** Both need a live pod; `find_pod_id` returns empty first, so
-  neither path can be reached without real spend.
+- **`idle-check.sh`'s DB-failure fail-safe is unexercised.** It needs the spend
+  query to fail while a pod runs, which has not happened. (`gpu-down.sh`'s drain
+  loop, formerly on this list, was exercised live on 2026-08-06: one request in
+  flight, waited ~6 s, drained to zero, destroyed.)
 
 ## Verification
 
