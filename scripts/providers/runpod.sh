@@ -37,6 +37,53 @@ print('%s %s' % (st, '-' if pr is None else pr))
 " 2>/dev/null || printf 'unknown -'
 }
 
+# What else could run this model right now. Only cards that can actually serve
+# the FP8 checkpoint on ONE GPU: >=48 GB, and FP8 tensor cores, which means Ada
+# or newer. Ampere (A40, A6000, A100) is excluded on purpose — it has the VRAM
+# but no FP8, so it would silently serve the checkpoint far slower.
+rp_alternatives() {
+  local ids
+  ids="$(curl -sS -m 30 -X POST "$RP_GQL" \
+      -H "Authorization: Bearer $RUNPOD_API_KEY" -H 'Content-Type: application/json' \
+      -d '{"query":"query { gpuTypes { id memoryInGb } }"}' 2>/dev/null | python3 -c "
+import sys, json
+BAD = ('A40','A6000','A100','MI300')          # >=48 GB but no FP8
+try: gs = json.load(sys.stdin)['data']['gpuTypes']
+except Exception: raise SystemExit
+for g in gs:
+    i = g.get('id') or ''
+    if (g.get('memoryInGb') or 0) >= 48 and not any(b in i for b in BAD):
+        print(i)
+" 2>/dev/null || true)"
+  [ -n "$ids" ] || return 0
+  log "cards that could serve this model, with stock right now:"
+  local id out st pr
+  while read -r id; do
+    [ -n "$id" ] || continue
+    out="$(rp_stock_global "$id")"
+    st="${out%% *}"; pr="${out##* }"
+    [ "$st" = "None" ] || [ "$st" = "unknown" ] || log "  \$$pr/hr  stock=$st  RUNPOD_GPU_TYPE=\"$id\""
+  done <<EOF
+$ids
+EOF
+  log "set the one you want in scripts/.env and re-run"
+}
+
+# Same as rp_stock but without pinning a datacenter.
+rp_stock_global() {
+  local body
+  body="$(printf '{"query":"query($id:String!){ gpuTypes(input:{id:$id}) { lowestPrice(input:{gpuCount:%d,secureCloud:true}) { stockStatus uninterruptablePrice } } }","variables":{"id":"%s"}}' \
+      "${GPU_COUNT:-1}" "$1")"
+  curl -sS -m 20 -X POST "$RP_GQL" \
+    -H "Authorization: Bearer $RUNPOD_API_KEY" -H 'Content-Type: application/json' \
+    -d "$body" 2>/dev/null | python3 -c "
+import sys, json
+try: lp = json.load(sys.stdin)['data']['gpuTypes'][0]['lowestPrice']
+except Exception: print('unknown -'); raise SystemExit
+print('%s %s' % (lp.get('stockStatus') or 'None', lp.get('uninterruptablePrice') if lp.get('uninterruptablePrice') is not None else '-'))
+" 2>/dev/null || printf 'unknown -'
+}
+
 # Returns 0 if at least one configured datacenter has stock. Prints a report.
 provider_capacity() {
   local dc st pr any=1
@@ -237,10 +284,20 @@ print(json.dumps(d,indent=2))" >&2
   pod_id="$(printf '%s' "$resp" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
   if [ -z "$pod_id" ]; then
     printf '%s\n' "$resp" >&2
-    # On-demand capacity is not contractual. This is the single biggest
-    # availability difference from bare metal, and it fails at the least
-    # convenient moment.
-    die "pod creation failed. If this is a capacity error, try the next region in RUNPOD_DATACENTERS (note: a network volume is pinned to one datacenter, so a different region means re-downloading weights)."
+    # On-demand capacity is not contractual, and "no instances available" across
+    # every configured region is common rather than exceptional. Saying so is
+    # useless on its own, so list what CAN be rented instead.
+    case "$resp" in
+      *"no instances"*|*"not available"*|*capacity*)
+        log "no capacity for $RUNPOD_GPU_TYPE in: $RUNPOD_DATACENTERS"
+        rp_alternatives
+        die "no capacity for the configured GPU — pick one listed above, or wait"
+        ;;
+    esac
+    if [ -n "${RUNPOD_VOLUME_ID:-}" ]; then
+      die "pod creation failed. Note a network volume pins this pod to one datacenter, so the other entries in RUNPOD_DATACENTERS cannot be used while RUNPOD_VOLUME_ID is set."
+    fi
+    die "pod creation failed — see the provider response above"
   fi
   printf '%s' "$pod_id"
 }

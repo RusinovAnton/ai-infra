@@ -73,6 +73,29 @@ written last week — is asserting something the provider does not guarantee.
 `./scripts/gpu-up.sh --check-capacity` asks at the moment of use, and
 `--create-storage` refuses to place storage where the GPU cannot currently run.
 
+### "No capacity" is the normal case, and the error tells you nothing useful
+
+**What it looked like.** `create pod: There are no instances currently
+available` — repeated once per configured region, which reads like eight
+different failures.
+
+**What was true.** One failure, reported per region. The GPU we had configured
+(RTX 6000 Ada) went from `stock=Low` to `NONE` globally within the hour. Nothing
+was wrong with the request.
+
+**What changed.** On a capacity error, `gpu-up.sh` now lists the cards that
+*can* serve this model and have stock right now, with prices, so the next step is
+visible instead of a guess. The filter is not just VRAM: Ampere cards (A40,
+A6000, A100) have 48–80 GB but no FP8 tensor cores, so they would serve the
+checkpoint far slower without erroring, and are excluded deliberately.
+
+**The general lesson.** Capacity for any *specific* card is scarce and swings
+within the hour, so a GPU pinned in config is a standing bet. Availability
+across the *class* of suitable cards is much steadier — on the same day, one Ada
+card was unavailable everywhere while L40S, RTX PRO 6000 Blackwell and H100 all
+had stock. Design for "any card meeting these constraints", not for one model
+number.
+
 ### Creating storage was not idempotent, and nothing complained
 
 Running `--create-storage` twice produced two identical 200 GB volumes. No error,
