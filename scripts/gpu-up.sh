@@ -55,13 +55,30 @@ check_placeholders
 
 existing="$(provider_find || true)"
 if [ -n "$existing" ]; then
-  log "node $NODE_NAME already exists (id=$existing, status=$(provider_status "$existing"))"
+  status="$(provider_status "$existing")"
+  log "node $NODE_NAME already exists (id=$existing, status=$status)"
   if engine_ready 2>/dev/null; then
     log "engine already answering at $(engine_base) — nothing to do"
     exit 0
   fi
-  log "node exists but the engine is not answering yet; waiting rather than creating a second one"
-else
+  # A stopped node never comes back on its own, so waiting on it waits forever.
+  # And on an ephemeral provider, resuming is the wrong move anyway: it wakes on
+  # the SAME host with the config baked at creation — if placement or provision
+  # was the problem, resume reproduces it while billing disk the whole time.
+  case "$status" in
+    EXITED|STOPPED|exited|stopped|TERMINATED)
+      if provider_is_ephemeral; then
+        log "node is $status — destroying it and creating a fresh one (a resume would rerun the old config on the old host)"
+        provider_destroy "$existing"
+        existing=""
+      else
+        die "node is $status — start it on the machine itself, then re-run"
+      fi
+      ;;
+    *) log "node exists but the engine is not answering yet; waiting rather than creating a second one" ;;
+  esac
+fi
+if [ -z "$existing" ]; then
   # ------------------------------------------------------------ rotate secret
   #
   # The engine secret has to reach a machine that is rebuilt nightly, and every
