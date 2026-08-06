@@ -27,7 +27,8 @@ export MODE
 # ------------------------------------------------------------ storage
 
 if [ "$MODE" = capacity ]; then
-  provider_capacity || die "no capacity in any configured datacenter — widen RUNPOD_DATACENTERS or wait"
+  # The driver reports WHERE it looked; this layer must not name the knob.
+  provider_capacity || die "no capacity in any configured location — widen the provider's location list, or wait"
   exit 0
 fi
 
