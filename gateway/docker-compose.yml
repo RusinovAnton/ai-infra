@@ -69,5 +69,53 @@ services:
       timeout: 5s
       retries: 20
 
+  # Cost guards and backups, so there is no host cron to install. OPT-IN:
+  #
+  #   docker compose --profile scheduler up -d
+  #
+  # Behind a profile because it is the only service that needs scripts/.env, and
+  # phase A deliberately runs the gateway with no provider credentials at all.
+  #
+  # ⚠️ This container holds RUNPOD_API_KEY — a credential that creates billable
+  # instances — on the gateway host. scripts/.env.example argues for keeping the
+  # two apart; running the guards here is what trades that away. The trade is
+  # forced: idle-check needs the spend log (only here) AND the provider API, so
+  # something must hold both. See docs/design-notes.md.
+  #
+  # No Docker socket is mounted, on purpose. The scripts reach Postgres over
+  # this network instead (PGHOST), so a compromise of this container cannot
+  # become control of the host's Docker daemon.
+  scheduler:
+    profiles: ["scheduler"]
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile.scheduler
+    container_name: ai-infra-scheduler
+    restart: unless-stopped
+    depends_on:
+      litellm-db:
+        condition: service_healthy
+    environment:
+      # Selects the direct-connection path in common.sh's pgx().
+      PGHOST: litellm-db
+      PGPORT: "5432"
+      LITELLM_DB_PASS: ${LITELLM_DB_PASS:?set in .env}
+      # "localhost" would be this container. The gateway is a service name here.
+      GATEWAY_URL: http://litellm:4000
+      # Schedules are wall-clock local, so the nightly stop must know the zone.
+      # Left as UTC this fires at the wrong hour rather than failing visibly.
+      TZ: ${TZ:-UTC}
+      SCHEDULER_STATE_DIR: /state
+    volumes:
+      # Read-only: the scheduler runs the scripts, it never edits them.
+      - ../scripts:/repo/scripts:ro
+      - ../gateway/.env:/repo/gateway/.env:ro
+      - ../scripts/.env:/repo/scripts/.env:ro
+      # Backups must outlive the container, and so must the run-state that stops
+      # a restart from re-firing today's jobs.
+      - ../backups:/repo/backups
+      - scheduler-state:/state
+
 volumes:
   pgdata:
+  scheduler-state:

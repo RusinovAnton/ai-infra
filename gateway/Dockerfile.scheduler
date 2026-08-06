@@ -1,0 +1,25 @@
+# Image for the optional scheduler service (docker-compose.yml, profile
+# `scheduler`). It runs scripts/scheduler.sh, which runs idle-check.sh and
+# pg-backup.sh on a timer.
+#
+# Based on the SAME digest as the litellm-db service so the client tools match
+# the server exactly. A pg_dump older than its server refuses to run, and that
+# is a failure you would discover during a restore.
+#
+# Note the tradeoff: the apt layer below is not reproducible the way the pinned
+# digests elsewhere in this repo are. Accepted because this image only schedules
+# work — it holds no model, serves no traffic, and can be rebuilt from scratch.
+FROM postgres@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
+
+# curl: the RunPod API and the engine's /metrics.
+# python3: date arithmetic and JSON parsing in the lifecycle scripts.
+# openssl: backup encryption. ca-certificates: TLS to the provider API.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      curl python3 openssl ca-certificates tzdata \
+ && rm -rf /var/lib/apt/lists/*
+
+# The scripts are mounted read-only at runtime rather than baked in, so editing
+# one does not mean rebuilding the image.
+WORKDIR /repo
+ENTRYPOINT ["/repo/scripts/scheduler.sh"]

@@ -47,6 +47,7 @@ gateway/  docker-compose.yml      LiteLLM + Postgres, loopback-bound, digest-pin
 gpu/      docker-compose.yml      vLLM flags — used on a VM provider
           provision.sh            runs ON the node: tailnet join, provenance, weights, engine
 scripts/  gpu-up.sh gpu-down.sh   RunPod REST wrappers; drain before destroy
+          scheduler.sh            cost guards + backups on a timer (sleep-safe; no cron)
           idle-check.sh           45 min idle + hard nightly stop
           pg-backup.sh            encrypted dump + rehearsed restore + retention audit
           common.sh               shared helpers, credential loading

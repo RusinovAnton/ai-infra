@@ -70,7 +70,6 @@ cd "$GATEWAY_DIR"
 # rehearse against — which proves pg_restore works but says nothing about
 # whether the encrypted file on disk is recoverable. A wrong passphrase or a
 # silently corrupted encryption step would still report success.
-GW=http://localhost:4000
 if [ "$VERIFY" = 1 ]; then
   K="$(curl -s -X POST "$GW/key/generate" -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
         -H 'Content-Type: application/json' \
@@ -83,7 +82,7 @@ fi
 log "dumping litellm"
 # Custom format so pg_restore can be selective, and so the restore rehearsal
 # below exercises the same path a real recovery would.
-docker compose exec -T litellm-db pg_dump -U litellm -d litellm -Fc > "$RAW"
+pgx pg_dump -U litellm -d litellm -Fc > "$RAW"
 chmod 600 "$RAW"
 [ -s "$RAW" ] || die "dump is empty"
 log "dump: $(du -h "$RAW" | cut -f1)"
@@ -96,7 +95,7 @@ if [ -n "$BACKUP_PASSPHRASE" ]; then
     -pass env:BACKUP_PASSPHRASE -in "$RAW" -out "$RAW.enc"
   chmod 600 "$RAW.enc"; rm -f "$RAW"
   log "encrypted: $RAW.enc"
-  log "decrypt with: openssl enc -d -aes-256-ctr -pbkdf2 -iter 600000 -pass env:BACKUP_PASSPHRASE -in <file> | docker compose exec -T litellm-db pg_restore -U litellm -d litellm"
+  log "decrypt with: openssl enc -d -aes-256-ctr -pbkdf2 -iter 600000 -pass env:BACKUP_PASSPHRASE -in <file> | docker compose exec -T litellm-db pg_restore -U litellm -d litellm  (or pg_restore directly if you have PGHOST set)"
 else
   # Not silently skipped: an unencrypted dump of every virtual key sitting on
   # the office machine is a different risk posture than the design assumes.
@@ -133,19 +132,19 @@ if [ "$VERIFY" = 1 ]; then
     cp "$ARTIFACT" "$REHEARSE"
   fi
 
-  docker compose exec -T litellm-db psql -qU litellm -d postgres \
+  pgx psql -qU litellm -d postgres \
     -c 'DROP DATABASE IF EXISTS restore_test;' -c 'CREATE DATABASE restore_test;' >/dev/null
-  docker compose exec -T litellm-db pg_restore -U litellm -d restore_test --no-owner < "$REHEARSE" >/dev/null 2>&1 || true
+  pgx pg_restore -U litellm -d restore_test --no-owner < "$REHEARSE" >/dev/null 2>&1 || true
 
   # The hash, not the key: LiteLLM stores keys hashed, so this is what a real
   # recovery would have to be able to authenticate against.
-  hash="$(printf '%s' "$K" | shasum -a 256 | cut -d' ' -f1)"
-  found="$(docker compose exec -T litellm-db psql -tAqU litellm -d restore_test \
+  hash="$(printf '%s' "$K" | sha256_hex)"
+  found="$(pgx psql -tAqU litellm -d restore_test \
     -c "SELECT count(*) FROM \"LiteLLM_VerificationToken\" WHERE token = '$hash';" 2>/dev/null | tr -d '[:space:]')"
-  tables="$(docker compose exec -T litellm-db psql -tAqU litellm -d restore_test \
+  tables="$(pgx psql -tAqU litellm -d restore_test \
     -c "select count(*) from information_schema.tables where table_schema='public';" 2>/dev/null | tr -d '[:space:]')"
 
-  docker compose exec -T litellm-db psql -qU litellm -d postgres \
+  pgx psql -qU litellm -d postgres \
     -c 'DROP DATABASE IF EXISTS restore_test;' >/dev/null
   curl -s -X POST "$GW/key/delete" -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
     -H 'Content-Type: application/json' -d "{\"keys\":[\"$K\"]}" >/dev/null || true

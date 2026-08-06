@@ -61,6 +61,41 @@ print('' if v is None else (json.dumps(v) if isinstance(v,(dict,list)) else v))
 "
 }
 
+# ------------------------------------------------------------ portability
+#
+# These scripts run in two places: on the gateway host, and inside the optional
+# scheduler container (gateway/docker-compose.yml, profile `scheduler`). The
+# helpers below are the only three things that differ between them.
+
+# The gateway's own API. Loopback on the host; a compose service name in the
+# container, where "localhost" is the container itself.
+GW="${GATEWAY_URL:-http://localhost:4000}"
+
+# macOS ships shasum, Debian ships sha256sum, and the scheduler image is Debian.
+sha256_hex() { # reads stdin, prints the hex digest
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1
+  else shasum -a 256 | cut -d' ' -f1
+  fi
+}
+
+# Postgres client access to the gateway database.
+#
+# Two paths, deliberately. On the host, `docker compose exec` needs no password
+# on the wire and no published port. Inside the scheduler container there is no
+# Docker socket — mounting one would hand a container that also holds
+# RUNPOD_API_KEY root-equivalent control of the host's Docker daemon — so it
+# connects over the compose network instead, selected by PGHOST being set.
+#
+# The same arguments work either way: -U and -d are ordinary client flags, while
+# host and password come from the environment.
+pgx() { # pgx PROGRAM [ARGS...]
+  if [ -n "${PGHOST:-}" ]; then
+    PGPASSWORD="${LITELLM_DB_PASS:?set in gateway/.env}" "$@"
+  else
+    ( cd "$GATEWAY_DIR" && docker compose exec -T litellm-db "$@" )
+  fi
+}
+
 # The engine, reached the only way anything is allowed to reach it.
 engine_base() { printf '%s' "${ENGINE_API_BASE%/v1}"; }
 

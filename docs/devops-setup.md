@@ -347,6 +347,43 @@ and holds the GPU reservation.
 
 ## 5. Cost guards and backups
 
+Two ways to run them. Pick by whether the gateway host is always on.
+
+### 5a. In the stack (recommended, and required if the host ever sleeps)
+
+```bash
+cd gateway && TZ=Europe/Berlin docker compose --profile scheduler up -d
+```
+
+Adds one container running `scripts/scheduler.sh`. No host cron, no launchd, no
+separate service to remember. It is behind a **profile**, so a plain
+`docker compose up -d` still starts the gateway alone — phase A keeps working
+with no provider credentials present.
+
+**Set `TZ`.** It defaults to UTC, and the nightly stop is a wall-clock time: left
+unset it fires at the wrong local hour and looks like it works.
+
+Why a loop rather than cron inside the container: cron does not fire while the
+host sleeps and never catches up, so a window that passes during sleep is lost
+silently — precisely the failure the nightly stop exists to bound. The loop
+compares wall-clock against a state file, so a job whose window passed while the
+machine was asleep runs once, late, on wake.
+
+⚠️ **This does not keep anything running while the host is asleep.** A closed
+laptop runs no guard of any kind. The provider-side spend alert is the only
+backstop that survives that, which is why §4.1 asks for one.
+
+Check it:
+
+```bash
+docker compose --profile scheduler logs -f scheduler
+```
+
+The state lives in a named volume, so restarting the container does not re-fire
+jobs already done today.
+
+### 5b. Host cron (always-on Linux only)
+
 ```bash
 crontab -e
 ```

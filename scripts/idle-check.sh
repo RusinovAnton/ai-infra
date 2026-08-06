@@ -59,8 +59,7 @@ fi
 # Last request timestamp comes from LiteLLM's spend log. This is a concrete
 # reason not to set disable_spend_logs: turn_off_message_logging redacts prompt
 # and response content while keeping exactly the rows this query needs.
-last="$(cd "$GATEWAY_DIR" && docker compose exec -T litellm-db \
-  psql -tAqU litellm -d litellm \
+last="$(pgx psql -tAqU litellm -d litellm \
   -c 'SELECT COALESCE(MAX("startTime"), to_timestamp(0)) FROM "LiteLLM_SpendLogs";' 2>/dev/null \
   | tr -d '\r' | xargs || true)"
 

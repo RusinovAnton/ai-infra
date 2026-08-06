@@ -114,6 +114,21 @@ which is enforced by the *absence* of a `src: ["tag:gpu"]` rule. Absence is easy
 to erase by accident, so `policy/tailnet-policy.hujson` asserts it in `tests` and
 `verify.sh` greps for it.
 
+**The cost guards need both halves of the credential split.** `scripts/.env` is
+kept apart from `gateway/.env` so the gateway host need never hold a key that can
+create billable instances. `idle-check.sh` breaks that: it needs the spend log,
+which only exists on the gateway, *and* the provider API, to stop the pod. One
+host must hold both. The scheduler container makes that explicit rather than
+accidental, and deliberately mounts no Docker socket — otherwise a container
+holding `RUNPOD_API_KEY` would also control the host's Docker daemon. The
+separation still buys something real: the *engine* node never holds either.
+
+**Nothing guards a sleeping host.** The scheduler recovers missed windows on
+wake, which cron does not, but neither runs while the machine is asleep. On a
+laptop the provider-side spend alert is the only guard that actually holds, and
+[incident-response.md](incident-response.md) treats a runaway pod as a live
+scenario rather than a theoretical one.
+
 **Backups live on the machine they protect.** A backup that only exists on the
 machine it protects is not one. Offsite is an open item; until it exists, a dead
 office server means re-issuing every key.
