@@ -235,6 +235,7 @@ env = {
     'MAX_MODEL_LEN':  os.environ.get('MAX_MODEL_LEN','65536'),
     'TP':             os.environ.get('TP','1'),
     'GPU_MEM_UTIL':   os.environ.get('GPU_MEM_UTIL','0.90'),
+    'MAX_NUM_SEQS':   os.environ.get('MAX_NUM_SEQS','64'),
     'VLLM_LIMIT_MM':  os.environ.get('VLLM_LIMIT_MM',''),
     'HF_HOME_HOST':   '/runpod-volume' if os.environ.get('RUNPOD_VOLUME_ID','').strip() else '/root/.cache/huggingface',
 }

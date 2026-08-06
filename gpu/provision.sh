@@ -146,6 +146,12 @@ VLLM_ARGS=(
   --tensor-parallel-size "$TP"
   --max-model-len "$MAX_MODEL_LEN"
   --gpu-memory-utilization "${GPU_MEM_UTIL:-0.90}"   # fraction of the WHOLE card, not of what remains
+  # Hybrid-attention models (Gated DeltaNet) need one Mamba cache block per
+  # concurrent decode sequence, carved from the same memory as KV cache. vLLM's
+  # default of 256 sequences does not fit beside a 65k context on 48 GB -- init
+  # fails with 'max_num_seqs (256) exceeds available Mamba cache blocks'. 64 is
+  # ample for a small team and leaves cache headroom.
+  --max-num-seqs "${MAX_NUM_SEQS:-64}"
   --api-key "$ENGINE_SECRET"          # defence in depth; the ACL is the real control
   --no-enable-log-requests            # no prompts on disk, on hardware we do not own
                                       # (was --disable-log-requests; vLLM renamed it to a

@@ -53,7 +53,10 @@ services:
       - --port=8000
       - --tensor-parallel-size=${TP:-1}
       - --max-model-len=${MAX_MODEL_LEN:-65536}
-      - --gpu-memory-utilization=0.90            # fraction of the WHOLE card, not of what remains
+      - --gpu-memory-utilization=0.90
+      # One Mamba cache block per decode sequence; 256 default does not fit
+      # beside a 65k context on 48 GB. Must match provision.sh.
+      - --max-num-seqs=${MAX_NUM_SEQS:-64}            # fraction of the WHOLE card, not of what remains
       - --api-key=${ENGINE_SECRET:?}             # defence in depth; the ACL is the real control
       # Renamed by vLLM from --disable-log-requests. Must match provision.sh.
       - --no-enable-log-requests                 # no prompts on disk, on hardware we do not own
