@@ -215,6 +215,40 @@ rate, roughly $14/mo; confirm the current figure. Include it whenever you report
 spend, so "we only pay when we use it" is not stated more strongly than it's
 true.
 
+#### The volume buys startup latency, not money
+
+Worth being exact about, because the intuition runs the other way. The volume
+exists so weights survive pod destruction — but re-downloading them is *cheap*:
+
+| | Cost |
+|---|---|
+| Volume, idle | ~$0.47/day, forever, whether or not a pod exists |
+| Re-downloading ~35 GB | a few minutes of GPU time — **cents per launch** |
+
+So the volume does not pay for itself on launch frequency. What it buys is cold
+start: **~1–2 min with the volume, ~5+ min without**, and a developer is waiting
+through that.
+
+That gives a clear rule:
+
+- **Wiring, testing, anything bursty** — delete the volume between sessions and
+  accept the re-download. Cheaper than the storage by a wide margin.
+- **Measurement week, or once developers depend on cold starts** — keep it.
+  $14/mo to halve the wait is obviously worth it then.
+
+Deleting an **empty** volume costs nothing at all. Create it the day you need
+fast cold starts; delete it when the phase ends.
+
+⚠️ There is no volume-less mode. `gpu-up.sh` requires `RUNPOD_VOLUME_ID`
+(`${RUNPOD_VOLUME_ID:?}`) and will abort if it is empty, so "delete between
+phases" means running `--create-volume` again and pasting the **new** id into
+`scripts/.env` before the next launch. Deleting the volume and forgetting that
+step is a failed launch, not a slow one.
+
+⚠️ Deleting a volume that holds weights is irreversible — the next launch
+re-downloads. That is fine here, since the weights are pinned by revision and
+byte-identical on refetch. It would not be fine for anything you generated.
+
 ### 4.4 Point the gateway at the node
 
 `gateway/.env`:

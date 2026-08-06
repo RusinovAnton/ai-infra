@@ -143,6 +143,13 @@ Real, unfixed, and worth knowing before they confuse someone:
 - **`"max retries exceeded"` is in `error_hook.py`'s unreachable-substring list.**
   It didn't false-positive in testing, but it's the entry most likely to misfire
   on an engine that *is* up.
+- ⚠️ **`gpu-up.sh` hard-requires a network volume**, so the cheapest operating
+  mode is unavailable. The volume bills ~$0.47/day idle while re-downloading the
+  weights costs cents of GPU time per launch — it buys cold-start latency, not
+  money — yet `${RUNPOD_VOLUME_ID:?}` means you cannot simply run without one
+  during wiring or bursty use. Supporting a volume-less launch needs the weights
+  pointed at container disk and `containerDiskInGb` re-sized, which is a real
+  change rather than a config tweak.
 - **`idle-check.sh`'s DB-failure fail-safe and `gpu-down.sh`'s drain loop are
   unexercised.** Both need a live pod; `find_pod_id` returns empty first, so
   neither path can be reached without real spend.
