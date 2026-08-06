@@ -31,8 +31,16 @@ Every command in this document is run from `gateway/` unless it starts with
 
 ### Web UI
 
-`https://gateway.<TAILNET>.ts.net/ui` — credentials are `UI_USERNAME` /
+`https://gateway.<TAILNET>.ts.net/ui/` — credentials are `UI_USERNAME` /
 `UI_PASSWORD` from `gateway/.env`.
+
+⚠️ **The trailing slash is required.** Without it LiteLLM answers `307` to
+`http://gateway.<TAILNET>.ts.net/ui/` — plain HTTP, because it builds the
+redirect from the request and cannot know `tailscale serve` terminated TLS in
+front of it. `serve` listens on 443 only, so that redirect lands on port 80 and
+returns `404`. The app is fine; only the redirect is wrong. Nothing to fix on the
+gateway — do not bind another port or add a proxy to work around it, since serve
+being the sole ingress is what makes `Tailscale-User-Login` trustworthy.
 
 Convenient for browsing keys and spend. **Not** the source of truth: it can create
 keys that exist nowhere in your notes, and the API and psql below are what
