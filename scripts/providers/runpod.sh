@@ -193,37 +193,16 @@ for x in v:
   log "put the returned id in scripts/.env as RUNPOD_VOLUME_ID"
 }
 
-provider_create() {
-  : "${TS_AUTHKEY:?set in scripts/.env}"
-
-  # choose_gpu() is generic and lives in common.sh; it sets GPU_CHOICE. The
-  # driver only translates that into its own request field.
-  # An explicitly configured RUNPOD_GPU_TYPE is an explicit choice; otherwise
-  # the generic chooser decides. Either way GPU_CHOICE ends up authoritative.
-  GPU_SELECT="${GPU_SELECT:-${RUNPOD_GPU_TYPE:-auto}}" choose_gpu >&2
-  RUNPOD_GPU_TYPE="${GPU_CHOICE:?no GPU chosen}"
-  export RUNPOD_GPU_TYPE
-
-  # RUNPOD_VOLUME_ID is OPTIONAL, and empty is usually the better choice.
-  #
-  # A network volume bills 24/7 and pins the pod to ONE datacenter — and only
-  # 17 datacenters support volumes at all, which in practice excludes wherever
-  # the cheap 48 GB Ada cards currently have stock. What it buys is measured, not
-  # assumed: 35 GB of weights fetched in 34 s on a live pod, versus ~1 s from
-  # cache. Half a minute per cold start, against a monthly bill and a hard
-  # constraint on which GPUs you can rent.
-  #
-  # So: no volume by default. Weights land on container disk, sized below.
-  if [ -n "${RUNPOD_VOLUME_ID:-}" ]; then
-    log "using network volume $RUNPOD_VOLUME_ID (pins this pod to its datacenter)" >&2
-  fi
-
+# Build the pod request JSON. Reads RUNPOD_GPU_TYPE (and everything else) from
+# the environment so the candidate loop can retry with a different card.
+rp_pod_body() {
   # provision.sh travels in the pod's env, base64-encoded, so the node is built
   # from what is in Git rather than from a provider template that can drift.
-  local provision_b64 body
+  local provision_b64
   provision_b64="$(base64 < "$REPO_ROOT/gpu/provision.sh" | tr -d '\n')"
 
-  body="$(PROVISION_B64="$provision_b64" python3 -c "
+  # Prints the JSON — the caller captures it.
+  PROVISION_B64="$provision_b64" python3 -c "
 import json, os
 env = {
     'PROVISION_B64':  os.environ['PROVISION_B64'],
@@ -285,10 +264,55 @@ else:
     req['containerDiskInGb'] = int(os.environ.get('RUNPOD_DISK_GB','120'))
 
 print(json.dumps(req, indent=2))
-")"
+"
+}
+
+provider_create() {
+  : "${TS_AUTHKEY:?set in scripts/.env}"
+
+  # choose_gpu() is generic and lives in common.sh; it sets GPU_CHOICE. The
+  # driver only translates that into its own request field.
+  # An explicitly configured RUNPOD_GPU_TYPE is an explicit choice; otherwise
+  # try shortlist candidates IN ORDER until one places. Stock is reported
+  # globally but creation is constrained to RUNPOD_DATACENTERS plus the CUDA
+  # filter, so the cheapest candidate often cannot actually be placed -- dying
+  # on it turns transient placement mismatch into a hard failure.
+  local candidates
+  case "${GPU_SELECT:-${RUNPOD_GPU_TYPE:-auto}}" in
+    ""|auto)
+      if [ "${GPU_PICK:-0}" = 1 ] && [ -t 0 ]; then
+        GPU_SELECT="${GPU_SELECT:-auto}" choose_gpu >&2
+        candidates="$GPU_CHOICE"
+      else
+        candidates="$(gpu_shortlist | cut -f1)"
+        [ -n "$candidates" ] || { show_offers >&2; die "nothing available meeting the constraints"; }
+      fi
+      ;;
+    *) candidates="${GPU_SELECT:-$RUNPOD_GPU_TYPE}" ;;
+  esac
+
+  # RUNPOD_VOLUME_ID is OPTIONAL, and empty is usually the better choice.
+  #
+  # A network volume bills 24/7 and pins the pod to ONE datacenter — and only
+  # 17 datacenters support volumes at all, which in practice excludes wherever
+  # the cheap 48 GB Ada cards currently have stock. What it buys is measured, not
+  # assumed: 35 GB of weights fetched in 34 s on a live pod, versus ~1 s from
+  # cache. Half a minute per cold start, against a monthly bill and a hard
+  # constraint on which GPUs you can rent.
+  #
+  # So: no volume by default. Weights land on container disk, sized below.
+  if [ -n "${RUNPOD_VOLUME_ID:-}" ]; then
+    log "using network volume $RUNPOD_VOLUME_ID (pins this pod to its datacenter)" >&2
+  fi
+
+  local body
 
   if [ "${MODE:-run}" = dry ]; then
-    log "dry run — pod request below, nothing created (secrets redacted)"
+    # Dry mode builds the request for the FIRST candidate only — enough to
+    # inspect the shape without touching the provider.
+    export RUNPOD_GPU_TYPE="$(printf '%s\n' "$candidates" | head -1)"
+    body="$(rp_pod_body)"
+    log "dry run — pod request below, nothing created (secrets redacted)" >&2
     printf '%s\n' "$body" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
@@ -298,26 +322,35 @@ print(json.dumps(d,indent=2))" >&2
     return 0
   fi
 
-  log "creating pod: ${GPU_COUNT:-1} × ${RUNPOD_GPU_TYPE} in ${RUNPOD_DATACENTERS}" >&2
-  local resp pod_id
-  resp="$(rp POST /pods "$body")"
-  pod_id="$(printf '%s' "$resp" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
-  if [ -z "$pod_id" ]; then
-    printf '%s\n' "$resp" >&2
-    # On-demand capacity is not contractual, and "no instances available" across
-    # every configured region is common rather than exceptional. Saying so is
-    # useless on its own, so list what CAN be rented instead.
+  local resp pod_id gpu
+  pod_id=""
+  while read -r gpu; do
+    [ -n "$gpu" ] || continue
+    export RUNPOD_GPU_TYPE="$gpu"
+    body="$(rp_pod_body)"
+    log "creating pod: ${GPU_COUNT:-1} × ${RUNPOD_GPU_TYPE} in ${RUNPOD_DATACENTERS}" >&2
+    resp="$(rp POST /pods "$body")"
+    pod_id="$(printf '%s' "$resp" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
+    [ -n "$pod_id" ] && break
     case "$resp" in
       *"no instances"*|*"not available"*|*capacity*)
-        log "no capacity for $RUNPOD_GPU_TYPE in: $RUNPOD_DATACENTERS"
-        show_offers
-        die "no capacity for that GPU — pick one listed above, or unset RUNPOD_GPU_TYPE to choose automatically"
+        # Global stock does not imply stock in OUR datacenters with OUR CUDA
+        # filter. Not fatal: the next candidate may place.
+        log "no capacity for $gpu in ${RUNPOD_DATACENTERS} (with CUDA ${RUNPOD_CUDA_VERSIONS:-12.8,13.0}) — trying next candidate" >&2
+        continue
         ;;
     esac
+    printf '%s\n' "$resp" >&2
     if [ -n "${RUNPOD_VOLUME_ID:-}" ]; then
       die "pod creation failed. Note a network volume pins this pod to one datacenter, so the other entries in RUNPOD_DATACENTERS cannot be used while RUNPOD_VOLUME_ID is set."
     fi
     die "pod creation failed — see the provider response above"
+  done <<EOF
+$candidates
+EOF
+  if [ -z "$pod_id" ]; then
+    show_offers >&2
+    die "no candidate could be placed in ${RUNPOD_DATACENTERS} — widen the datacenter list, relax GPU_MAX_PRICE, or wait"
   fi
   printf '%s' "$pod_id"
 }
