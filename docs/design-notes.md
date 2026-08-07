@@ -3,10 +3,14 @@
 Why the system is shaped this way. Read before changing anything structural —
 several things that look missing are missing on purpose.
 
-The *Corrections* section below reads oddly out of context: it records where the
-build contradicted the design document it was built from. That document is not in
-this repo (it carries deployment-specific vendor and cost analysis), so the
-corrections are written to stand alone — each states the wrong belief and the
+For the system as it now stands — topology, model sizing, the provider boundary,
+measured numbers — see [architecture.md](architecture.md). This file is the
+narrower thing: the reasoning that would otherwise be lost, including where the
+build contradicted the plan it was built from.
+
+The *Corrections* section below reads oddly out of context for that reason: the
+document being corrected is the original design plan, which is not in this repo.
+So each correction is written to stand alone — it states the wrong belief and the
 measured reality, which is the part worth keeping anyway.
 
 ---

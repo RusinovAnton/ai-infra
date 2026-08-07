@@ -23,6 +23,7 @@ tasks, not on code — see [docs/devops-setup.md](docs/devops-setup.md).
 
 | You are | Read |
 |---|---|
+| **New to the system**, or explaining it to someone | [docs/architecture.md](docs/architecture.md) — what it is, why it is shaped this way, current status and measured numbers |
 | **Standing it up** for the first time | [docs/devops-setup.md](docs/devops-setup.md) — zero to working, in order, including what to check before spending |
 | **Running the network** — ACLs, tags, keys, the GPU node's lifecycle | [docs/tailnet-admin.md](docs/tailnet-admin.md) |
 | **Running the gateway** — access, keys, spend, models, backups | [docs/gateway-admin.md](docs/gateway-admin.md) |
@@ -58,6 +59,7 @@ scripts/  gpu-up.sh gpu-down.sh   provider-agnostic lifecycle; drain before down
           common.sh               shared helpers, credential loading
 verify.sh                         ~85 checks; GPU/tailnet ones skip cleanly
 docs/                             per-role documentation (table above)
+          architecture.md         whole-system view: shape, reasoning, status
           lessons.md              symptom -> cause -> fix, from real incidents
 ```
 
