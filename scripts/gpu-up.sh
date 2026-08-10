@@ -6,7 +6,7 @@
 #   ./gpu-up.sh                   bring the node up and wait for the engine
 #   ./gpu-up.sh --create-storage  one-time storage setup, if the provider needs it
 #   ./gpu-up.sh --list-gpus       what is rentable right now, cheapest first
-#   ./gpu-up.sh --pick            choose interactively instead of taking cheapest
+#   ./gpu-up.sh --pick            try your choice first, then the rest of the list
 #   ./gpu-up.sh --check-capacity  is the configured GPU available? costs nothing
 #   ./gpu-up.sh --dry-run         print what would be created, spending nothing
 #

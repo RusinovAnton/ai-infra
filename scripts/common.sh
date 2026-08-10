@@ -177,11 +177,17 @@ EOF
   return 0
 }
 
-# Sets GPU_CHOICE. Honours an explicit choice, otherwise takes the cheapest —
-# or asks, when --pick was passed AND this is a terminal. It must never block
-# waiting for input it cannot receive: gpu-up runs from the scheduler too.
+# Sets GPU_CHOICE, and GPU_SHORTLIST to the whole list it saw (cheapest first,
+# one GPU id per line). A driver wanting fallbacks after the chosen card must
+# reuse that instead of calling gpu_shortlist() again: provider_offers() is a
+# live API call, ~20 s, and is not cached anywhere.
+#
+# Honours an explicit choice, otherwise takes the cheapest — or asks, when
+# --pick was passed AND this is a terminal. It must never block waiting for
+# input it cannot receive: gpu-up runs from the scheduler too.
 choose_gpu() {
   GPU_CHOICE=""
+  GPU_SHORTLIST=""
   case "${GPU_SELECT:-auto}" in
     ""|auto) ;;
     *) GPU_CHOICE="$GPU_SELECT"; log "using the GPU named in the environment: $GPU_CHOICE"; return 0 ;;
@@ -189,6 +195,7 @@ choose_gpu() {
 
   local list; list="$(gpu_shortlist)"
   [ -n "$list" ] || { show_offers; die "nothing available meeting the constraints"; }
+  GPU_SHORTLIST="$(printf '%s\n' "$list" | cut -f1)"
 
   if [ "${GPU_PICK:-0}" = 1 ] && [ -t 0 ]; then
     show_offers

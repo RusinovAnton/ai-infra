@@ -282,12 +282,20 @@ provider_create() {
   # globally but creation is constrained to RUNPOD_DATACENTERS plus the CUDA
   # filter, so the cheapest candidate often cannot actually be placed -- dying
   # on it turns transient placement mismatch into a hard failure.
+  # --pick means "start HERE", not "only here". A picked card that cannot be
+  # placed is the common case (stock is reported globally, placement is not),
+  # and treating the pick as the whole list turned that into a hard failure
+  # while the rest of the shortlist sat unused.
   local candidates
   case "${GPU_SELECT:-${RUNPOD_GPU_TYPE:-auto}}" in
     ""|auto)
       if [ "${GPU_PICK:-0}" = 1 ] && [ -t 0 ]; then
+        # choose_gpu also publishes GPU_SHORTLIST, so the fallbacks cost no
+        # second listing call.
         GPU_SELECT="${GPU_SELECT:-auto}" choose_gpu >&2
-        candidates="$GPU_CHOICE"
+        # `|| true`: with a one-entry shortlist grep matches nothing and exits 1,
+        # which under set -e is the assignment's status and would abort the launch.
+        candidates="$(printf '%s\n' "$GPU_CHOICE"; printf '%s\n' "$GPU_SHORTLIST" | grep -Fxv "$GPU_CHOICE" || true)"
       else
         candidates="$(gpu_shortlist | cut -f1)"
         [ -n "$candidates" ] || { show_offers >&2; die "nothing available meeting the constraints"; }
@@ -327,11 +335,13 @@ print(json.dumps(d,indent=2))" >&2
     return 0
   fi
 
-  local resp pod_id gpu
+  local resp pod_id gpu tried
   pod_id=""
+  tried=""
   while read -r gpu; do
     [ -n "$gpu" ] || continue
     export RUNPOD_GPU_TYPE="$gpu"
+    tried="${tried:+$tried, }$gpu"
     body="$(rp_pod_body)"
     log "creating pod: ${GPU_COUNT:-1} × ${RUNPOD_GPU_TYPE} in ${RUNPOD_DATACENTERS}" >&2
     resp="$(rp POST /pods "$body")"
@@ -355,7 +365,12 @@ $candidates
 EOF
   if [ -z "$pod_id" ]; then
     show_offers >&2
-    die "no candidate could be placed in ${RUNPOD_DATACENTERS} — widen the datacenter list, relax GPU_MAX_PRICE, or wait"
+    # Name what was actually tried, and only suggest knobs that are in play.
+    # The old message named GPU_MAX_PRICE unconditionally, which sent us
+    # looking at a limit that was not set.
+    local hint="widen RUNPOD_DATACENTERS, lower GPU_MIN_VRAM_GB (now ${GPU_MIN_VRAM_GB:-48}), or wait"
+    [ -n "${GPU_MAX_PRICE:-}" ] && hint="raise GPU_MAX_PRICE (now \$$GPU_MAX_PRICE/hr), $hint"
+    die "no candidate could be placed in ${RUNPOD_DATACENTERS} (with CUDA ${RUNPOD_CUDA_VERSIONS:-12.8,13.0}). Tried, in order: ${tried:-none} — $hint"
   fi
   printf '%s' "$pod_id"
 }
