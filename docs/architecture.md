@@ -236,11 +236,28 @@ while quality does not convert back**: the MoE's headroom buys a 32k reasoning
 budget, retries, multi-attempt agentic loops. The dense model's benchmark
 advantage cannot be spent on being faster.
 
-Three further points, each individually sufficient: the 27B has no official FP8
-checkpoint (~54 GB BF16); its KV cache is ~3× larger per token; and at 54 GB of
-weights there is no headroom left for concurrency.
+This section used to list three further points, each claimed to be individually
+sufficient: no official FP8 checkpoint (~54 GB BF16), a KV cache ~3× larger per
+token, and no concurrency headroom at 54 GB of weights. **Two of the three are no
+longer true.** `Qwen/Qwen3.6-27B-FP8` is an official Qwen checkpoint (published
+2026-04-21, revision `e89b16eb`, ungated, safetensors only) and it is **30.9 GB**,
+not 54 — so it fits one card, and the headroom argument built on 54 GB goes with
+it.
 
-The 27B remains the A/B candidate. Switch only on a *task-class* failure that the
+What survives is the KV cache, and it decides the question on its own:
+
+```
+Qwen3.6-27B-FP8   weights 30.9 GB  →  ~12 GB KV  →  ~190k tokens aggregate
+                                       @ 65k ctx   ≈ 3 concurrent full-context streams
+```
+
+Half the concurrency of the MoE, on top of reading ~9× the parameters per token.
+Slower per stream *and* fewer streams, for +3.8 SWE-bench. The throughput
+argument above is now the whole case, and it still holds.
+
+The 27B remains the A/B candidate, and it is now a **same-card** A/B — a
+`MODEL_ID` / `MODEL_REVISION` swap in `scripts/.env`, no hardware change, which is
+not what this section used to say. Switch only on a *task-class* failure that the
 reasoning budget cannot close — not on a benchmark delta.
 
 ### These are vision-language models
@@ -806,8 +823,18 @@ signal.
   TTFT p95 > ~5 s, or `vllm:num_preemptions_total` climbing during normal hours,
   or agents routinely truncating at 65k. Try prefix caching first.
 - **A task-class failure the reasoning budget cannot close** → reconsider
-  Qwen3.6-27B: permanent 2-GPU, BF16, 65k.
+  `Qwen3.6-27B-FP8`. At 30.9 GB this is now a same-card swap of `MODEL_ID` /
+  `MODEL_REVISION`, not the permanent 2-GPU BF16 commitment this line used to
+  describe. Expect ~3 concurrent streams instead of ~6, and much slower decode.
+  Bench it against `bench/tasks/` before believing the benchmark delta.
+- **A second card becomes justified** → the target is `Qwen3-Coder-Next-FP8`
+  (80B-A3B, official FP8, 80.4 GB, ~3B activated), not the 27B. Same
+  activated-parameter profile as today's model, so the throughput argument that
+  rules out the dense 27B does not apply to it. Does not fit one 48 GB card at
+  any official precision.
 - **Only Ampere orderable anywhere** → 2 × A6000 on BF16. Never FP8 on Ampere.
+  For 2 × RTX 3090 specifically the answer is INT4, not BF16, and the runbook is
+  [devops-setup.md §9](devops-setup.md#9-alternative-hardware-2--rtx-3090).
 - **A vendor with a hypervisor boundary confirms hourly billing, a scriptable
   API and a dedicated physical card** → a new file in `scripts/providers/`, at a
   quiet week. Not a migration.

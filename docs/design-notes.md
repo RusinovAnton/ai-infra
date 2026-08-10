@@ -101,8 +101,89 @@ because the wrong version is the one a reader is likely to arrive with.
    different ground: the A6000 is Ampere, so **no FP8 tensor cores** — serving the
    FP8 checkpoint on it is a silent performance loss, not an error you'd see, and
    the BF16 alternative needs ~70 GB against 48 GB. Worth re-examining if a
-   cheaper Ada-or-newer pair appears. 2 × 3090 cannot run this model at all: no
-   FP8, and 35 GB/card exceeds 24 GB even sharded.
+   cheaper Ada-or-newer pair appears. (This item originally ended by claiming
+   2 × 3090 "cannot run this model at all: no FP8, and 35 GB/card exceeds 24 GB
+   even sharded". Both halves are wrong — see correction 8.)
+
+7. **`Qwen3.6-27B` does have an official FP8 checkpoint, and the A/B is a
+   same-card swap** (found 2026-08-10, later than the rest of this section — by
+   checking the Hugging Face API rather than by building). The rejection of the
+   27B was written down as four reasons: slower decode, no official FP8
+   checkpoint, ~3× KV cache per token, and no concurrency headroom at ~54 GB of
+   BF16 weights.
+
+   `Qwen/Qwen3.6-27B-FP8` exists — Qwen's own org, published 2026-04-21, revision
+   `e89b16eb`, ungated, safetensors only, **30.9 GB**. So two of the four reasons
+   are void: there is an official FP8 checkpoint, and at 30.9 GB it fits one 48 GB
+   card with ~12 GB left for KV.
+
+   The decision does not change. ~12 GB of KV at the 27B's ~64 KB/token is ~190k
+   tokens — about **3** concurrent 65k streams against the MoE's 6 — and the dense
+   model still reads ~9× the parameters per token. Slower per stream and fewer
+   streams, for +3.8 SWE-bench.
+
+   The part worth keeping is how the original was written. Four reasons were
+   listed as if each were independently sufficient; in fact **one** carried the
+   decision (throughput) and the other three were padding around it. Two of the
+   three expired within four months, and had the load-bearing reason been among
+   them the conclusion would have silently rotted while still reading as
+   well-supported.
+
+   Practical consequence: the 27B A/B is now cheap — `MODEL_ID` and
+   `MODEL_REVISION` in `scripts/.env`, no hardware change — so if the question
+   comes up again, measure it with `bench/tasks/` instead of re-arguing it. The
+   2-GPU candidate is no longer the 27B either; see the revisit triggers in
+   [architecture.md](architecture.md#revisit-triggers).
+
+8. **2 × RTX 3090 can run this model — the stated reasons it could not were both
+   wrong** (found 2026-08-10, while pricing owned hardware). Correction 6
+   originally ended by ruling out 2 × 3090 on two grounds: no FP8, and "35 GB/card
+   exceeds 24 GB even sharded."
+
+   *Sharded* is what TP=2 means. 37.5 GB across two cards is ~18.8 GB per card,
+   and 2 × 24 GB at 0.90 utilisation is 43.2 GB usable — **identical to the single
+   L40S**. The capacity argument was arithmetic that forgot to divide.
+
+   "No FP8" is not a wall either. vLLM runs FP8 weights on Ampere through FP8
+   Marlin as weight-only W8A16. What actually blocks *this* checkpoint is
+   narrower: FP8 Marlin's lack of block-wise and MoE coverage, and Qwen3.6's FP8
+   is fine-grained block-128 **and** MoE. So the conclusion survived on a reason
+   nobody had written down — the same failure as correction 7, one step worse,
+   because here the reasons given were not merely padding but false.
+
+   What is actually true: on 2 × 3090 you serve INT4 (Ampere's native low
+   precision), weights drop to 21.5 GB, and you get *more* KV headroom than the
+   FP8 path — ~16 concurrent 65k streams against ~6. Bandwidth is not a problem
+   either; a 3090 is 936 GB/s against the L40S's 864. The real costs are INT4
+   answer quality and a community quant, not capacity or speed.
+
+   Runbook, model id and pinned revision:
+   [devops-setup.md §9](devops-setup.md#9-alternative-hardware-2--rtx-3090).
+
+   The reusable lesson, twice over now: when a decision is defended by a list,
+   check whether the list is load-bearing or decorative. Both times the true
+   reason was real and the reasons stacked around it rotted.
+
+9. **`--pick` meant "only this card", and that was not the intent** (found
+   2026-08-10, on a launch that failed while seven usable cards were listed on
+   screen). Automatic selection walks the shortlist in price order until one
+   *places*, because stock is reported globally while placement is constrained by
+   `RUNPOD_DATACENTERS` and the CUDA filter — the cheapest card frequently cannot
+   actually be rented. `--pick` set `candidates="$GPU_CHOICE"`, a one-entry list,
+   so the interactive path silently gave up the fallback the automatic path is
+   built around: picking the cheapest card by hand was *worse* than not picking at
+   all.
+
+   `--pick` now means "start here": the chosen card first, then the remaining
+   shortlist in price order.
+
+   The misleading part was the error, not the behaviour. It read `widen the
+   datacenter list, relax GPU_MAX_PRICE, or wait` — naming a price cap that was
+   unset, on a run whose real problem was that exactly one candidate had been
+   tried. It now names the candidates actually attempted, and only suggests knobs
+   that are in play. A failure message that lists plausible causes it has not
+   checked sends the next person to the wrong file; `Tried, in order: …` would
+   have made this a ten-second read.
 
 ## The provider boundary
 

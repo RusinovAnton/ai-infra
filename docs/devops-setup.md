@@ -525,3 +525,149 @@ rather than announce themselves:
   aider will not surface it. Test with opencode.
 - **Tailscale falling back to DERP relays** puts every prompt and token through a
   relay hop. `tailscale status` must read `direct`.
+
+---
+
+## 9. Alternative hardware: 2 × RTX 3090
+
+The default path assumes one Ada-or-newer 48 GB card, because FP8 needs Ada. Two
+3090s are the cheapest way to 48 GB, and they do work — but with a different
+model file, three config changes, and one billing trap that can cost real money.
+
+Sizes and revisions below were read from the Hugging Face API on 2026-08-10.
+
+### 9.1 Do the cheap experiment first
+
+**The purchase decision is a quantization question, not a hardware question, and
+you can answer it on the L40S you already rent.** INT4 runs fine on Ada. Point
+`MODEL_ID` at the INT4 checkpoint below, run `TASKS=1 ./scripts/bench.sh coder
+coder-max` against `bench/tasks/`, and compare to your FP8 baseline. About a
+dollar of GPU time.
+
+If INT4 holds up on your real tasks, the 3090s are a reasonable buy. If it does
+not, no hardware fixes it — you need FP8, which means Ada or newer. Do not buy
+first.
+
+### 9.2 Why the model has to change
+
+A 3090 is Ampere: **no FP8 tensor cores**. vLLM can run FP8 weights on Ampere via
+FP8 Marlin as weight-only W8A16, but that path historically did not cover
+block-wise FP8 or MoE — and `Qwen3.6-35B-A3B-FP8` is both (fine-grained FP8,
+block size 128, MoE). Assume the FP8 checkpoint will not load until you have
+watched it load.
+
+Ampere's native low-precision strength is INT4/INT8, so that is what to serve.
+The checkpoint stays the same model:
+
+```
+MODEL_ID=Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound
+MODEL_REVISION=65f69c73f17488236c85c85211f6ba28d7106157
+```
+
+21.5 GB, ungated, safetensors only, `Qwen3_5MoeForConditionalGeneration`,
+`quant_method: auto-round`. Intel's AutoRound is the best-provenance community
+quant available — a real org with a published quantization line — but it is
+**not** an official Qwen checkpoint, which is a deliberate step down from the
+principle in [architecture.md](architecture.md#primary-qwen36-35b-a3b-fp8).
+
+The memory picture is better than the FP8 path, because INT4 halves the weights:
+
+```
+2 × 24 GB, TP=2, 0.90 utilisation  →  43.2 GB usable
+  weights 21.5 GB  →  ~21.7 GB KV  →  ~1.08M tokens aggregate
+                                       @ 65k ctx ≈ 16 concurrent streams
+```
+
+Against ~6 on the single L40S. Bandwidth is fine too — a 3090 is 936 GB/s
+against the L40S's 864, and NVLink is reported to add ~48% to tensor-parallel
+throughput over PCIe. **The cost is answer quality, not speed or capacity.**
+
+Alternatives that also fit, if you want to compare: `cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit`
+(25.0 GB) and `Avesed/Qwen3.6-35B-A3B-INT4-W4A16` (25.6 GB).
+`Qwen3-Coder-Next` does **not** fit — the smallest INT4 build is 43.5 GB against
+43.2 GB usable, and raising `--gpu-memory-utilization` to buy the difference
+leaves no KV cache and risks OOM on consumer cards.
+
+### 9.3 Three config changes
+
+**1. Tensor parallelism.** In `scripts/.env`:
+
+```
+GPU_COUNT=2
+TP=2
+```
+
+**2. Shared memory.** Uncomment `ipc: host` in `gpu/docker-compose.yml` **in the
+same change**. Without it, multi-GPU startup fails with a cryptic NCCL error
+rather than a clear one. `verify.sh` asserts these two move together, so it will
+catch you if you forget.
+
+**3. The provenance gate.** `gpu/provision.sh` hard-codes the publishing org:
+
+```bash
+[ "$author" = "Qwen" ] || die "publishing org is '${author}' ..."
+```
+
+Any community quant is refused by design. Widen it to a **named allowlist** —
+`Qwen` and `Intel`, not "anything" — so the check still does its job. This is a
+security control, not boilerplate: it is what stops a typo'd or squatted repo id
+from silently fetching someone else's weights.
+
+The tool-call and reasoning parsers do **not** change. Same model family, so
+`--tool-call-parser qwen3_coder` and `--reasoning-parser qwen3` stay as they are,
+and the `coder` / `coder-max` thinking split keeps working.
+
+### 9.4 vast.ai bills while the engine is stopped
+
+vast.ai has no driver in `scripts/providers/`. It gives you SSH and Docker, so
+`GPU_PROVIDER=ssh` works today with no new code:
+
+```
+GPU_PROVIDER=ssh
+GPU_SSH_HOST=<vast instance>
+GPU_SSH_USER=root
+GPU_SSH_KEY=~/.ssh/id_ed25519
+```
+
+**Read this before leaving it running.** The `ssh` driver is `PROVIDER_KIND=persistent`,
+which means `gpu-down.sh` and the idle check **stop the engine and never destroy
+the machine**. That is correct for hardware you own. On vast.ai, which bills by
+the hour, it means the instance keeps charging after every automatic shutdown —
+the idle guard frees VRAM and power, and saves you nothing at all.
+
+So on vast.ai, with the `ssh` driver, **destroying the instance is a manual step
+in the vast.ai console.** Nothing in this repo will do it for you, and nothing
+will warn you daily. Treat every test session as something you end by hand.
+
+If 3090s become the real plan rather than a test, write
+`scripts/providers/vastai.sh` as `ephemeral` — six functions, copy `manual.sh`,
+see [providers/README.md](../scripts/providers/README.md). Then destroy-when-idle
+works the way it does on RunPod and the trap goes away.
+
+### 9.5 Verify
+
+```bash
+./verify.sh --disruptive
+```
+
+Must be 0 failed. Then the two checks a stub cannot make, per
+[§4.8](#48-prove-the-model-actually-works): tool calling through opencode, and
+the thinking split between `coder` and `coder-max`.
+
+One extra check that only matters here — confirm vLLM actually loaded INT4 and
+did not silently fall back:
+
+```bash
+docker logs ai-infra-vllm 2>&1 | grep -i "auto-round\|awq\|quantization"
+```
+
+### 9.6 What you are accepting
+
+- **INT4 answer quality**, below FP8 by an amount you should measure rather than
+  assume — hence §9.1.
+- **A community quant**, against the provenance principle the FP8 checkpoint was
+  chosen to satisfy.
+- **~700 W** from the GPUs alone. Air cooling two 3090s for 24/7 inference is
+  not practical; budget for water cooling on owned hardware.
+- **Used, out-of-warranty Ampere** — the generation `gpu-up.sh` excludes by
+  allowlist on the rented path.
