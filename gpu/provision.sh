@@ -26,6 +26,11 @@ die() { log "FATAL: $*" >&2; exit 1; }
 : "${ENGINE_SECRET:?engine api key required}"
 : "${MODEL_ID:?}"
 : "${MODEL_REVISION:?}"
+# Asserted HERE, not only where the engine is launched: the launch is step 4, on
+# the far side of a 62 GB download. A missing parser should cost seconds, not a
+# GPU-hour of fetching weights we are then unable to serve correctly.
+: "${TOOL_CALL_PARSER:?set in scripts/.env, beside MODEL_ID}"
+: "${REASONING_PARSER:?set in scripts/.env, beside MODEL_ID}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
 TP="${TP:-1}"
 HF_HOME_HOST="${HF_HOME_HOST:-/runpod-volume}"
@@ -115,8 +120,20 @@ log "checking model provenance for ${MODEL_ID}@${MODEL_REVISION}"
 meta="$(curl -fsS "https://huggingface.co/api/models/${MODEL_ID}?revision=${MODEL_REVISION}")" \
   || die "cannot fetch model metadata — wrong id or revision?"
 
+# Allowlist, hardcoded here rather than read from the environment: this is the
+# control that stops a typo'd or hostile MODEL_ID pulling arbitrary weights onto
+# hardware we do not own, so widening it should be a reviewed change in Git and
+# not a one-line .env edit.
+#
+# Both entries are the ORIGINAL publisher of their own checkpoint. Adding a
+# third-party quantizer is a DIFFERENT decision — it means trusting whoever
+# repackaged the weights, not only whoever trained them. See docs/design-notes.md.
+MODEL_ORGS='Qwen zai-org'
 author="$(printf '%s' "$meta" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("author",""))')"
-[ "$author" = "Qwen" ] || die "publishing org is '${author}', expected 'Qwen' — refusing to download"
+case " $MODEL_ORGS " in
+  *" $author "*) ;;
+  *) die "publishing org is '${author}', not one of: ${MODEL_ORGS} — refusing to download" ;;
+esac
 
 sha="$(printf '%s' "$meta" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("sha",""))')"
 [ "$sha" = "$MODEL_REVISION" ] || die "resolved sha ${sha} != pinned ${MODEL_REVISION}"
@@ -127,7 +144,7 @@ import sys,json
 f=[s["rfilename"] for s in json.load(sys.stdin).get("siblings",[])]
 print(" ".join(x for x in f if x.endswith((".bin",".pth",".pkl",".pickle"))))')"
 [ -z "$bad" ] || die "non-safetensors weight files present: ${bad}"
-log "provenance OK: org=Qwen, revision matches pin, safetensors only"
+log "provenance OK: org=${author}, revision matches pin, safetensors only"
 
 # ---------------------------------------------------------------- 3. weights
 
@@ -161,11 +178,16 @@ VLLM_ARGS=(
   --tensor-parallel-size "$TP"
   --max-model-len "$MAX_MODEL_LEN"
   --gpu-memory-utilization "${GPU_MEM_UTIL:-0.90}"   # fraction of the WHOLE card, not of what remains
-  # Hybrid-attention models (Gated DeltaNet) need one Mamba cache block per
-  # concurrent decode sequence, carved from the same memory as KV cache. vLLM's
-  # default of 256 sequences does not fit beside a 65k context on 48 GB -- init
-  # fails with 'max_num_seqs (256) exceeds available Mamba cache blocks'. 64 is
-  # ample for a small team and leaves cache headroom.
+  # Not vLLM's default of 256, for BOTH candidate checkpoints — different
+  # reasons, same number:
+  #   Qwen3.6 (Gated DeltaNet) needs one Mamba cache block per concurrent decode
+  #     sequence, carved from the same memory as KV cache. 256 does not fit
+  #     beside a 65k context on 48 GB and init fails outright with
+  #     'max_num_seqs (256) exceeds available Mamba cache blocks'.
+  #   GLM-4.7-Flash has no Mamba cache at all, but its MLA KV costs
+  #     (512 + 64) x 2 B x 47 layers = 54.1 kB/token — 3.55 GB per 65k stream —
+  #     so 256 slots is far more than any cache we can afford would back.
+  # 64 is ample for a small team and leaves headroom under either.
   --max-num-seqs "${MAX_NUM_SEQS:-64}"
   --api-key "$ENGINE_SECRET"          # defence in depth; the ACL is the real control
   --no-enable-log-requests            # no prompts on disk, on hardware we do not own
@@ -174,15 +196,29 @@ VLLM_ARGS=(
                                       #  fatal: argparse exits 1, so the container restarts
                                       #  forever while the pod still reports RUNNING)
   --enable-auto-tool-choice
-  --tool-call-parser qwen3_coder      # NOT hermes — wrong parser returns prose, silently
-  --reasoning-parser qwen3            # required even on the non-thinking alias
+  # Both come from scripts/.env, beside MODEL_ID, because they are ONE decision
+  # with it. A parser that does not match the checkpoint returns prose where
+  # agents expect tool_calls and fails SILENTLY — aider will not surface it
+  # because it uses text diffs; opencode and Claude Code will.
+  #   GLM-4.7-Flash -> glm47        (emits <tool_call>name<arg_key>k</arg_key>…)
+  #   Qwen3.6       -> qwen3_coder  (NOT hermes)
+  # No default value on purpose: an unset parser is a silent wrong-output bug,
+  # which is precisely what this pairing exists to prevent, so fail loudly here.
+  --tool-call-parser "${TOOL_CALL_PARSER:?set in scripts/.env, beside MODEL_ID}"
+  # Required even on the non-thinking alias — without it reasoning text lands
+  # inside `content`.
+  --reasoning-parser "${REASONING_PARSER:?set in scripts/.env, beside MODEL_ID}"
 )
 
-# Every checkpoint in this family is a vision-language model, and vLLM profiles
-# multimodal memory using a dummy image at MAXIMUM resolution. That reservation
-# lands directly against KV cache and can exceed the vision tower's own weights,
-# so on a 48 GB card it is a plausible cause of "engine core initialization
-# failed" with no obvious culprit.
+# QWEN3.6 ONLY. Every checkpoint in that family is a vision-language model, and
+# vLLM profiles multimodal memory using a dummy image at MAXIMUM resolution. That
+# reservation lands directly against KV cache and can exceed the vision tower's
+# own weights, so on a 48 GB card it is a plausible cause of "engine core
+# initialization failed" with no obvious culprit.
+#
+# GLM-4.7-Flash is text-only — Glm4MoeLiteForCausalLM, no vision_config — so
+# there is no reservation to reclaim and this must stay unset there. Passing a
+# zero limit to a text-only model buys nothing and risks the chat template.
 #
 # We never send images. Setting this to zero reclaims the reservation.
 # Off by default because it can affect whether the chat template applies
@@ -200,6 +236,7 @@ if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
   VLLM_BIND_HOST="$VLLM_BIND_HOST" HF_HOME="$HF_HOME_HOST" \
   MODEL_ID="$MODEL_ID" MODEL_REVISION="$MODEL_REVISION" \
   MAX_MODEL_LEN="$MAX_MODEL_LEN" TP="$TP" ENGINE_SECRET="$ENGINE_SECRET" \
+  TOOL_CALL_PARSER="$TOOL_CALL_PARSER" REASONING_PARSER="$REASONING_PARSER" \
     docker compose up -d
   log "vLLM starting under compose. Readiness is /v1/models -> 200, NOT tag:gpu online."
 else
@@ -226,7 +263,11 @@ else
   set -e
 
   log "ENGINE EXITED rc=$rc — serving the failure on :8000 so it is visible from the gateway"
-  RC="$rc" python3 - <<'PYEOF'
+  # VLLM_BIND_HOST passed EXPLICITLY. It is a plain shell variable, not exported,
+  # so the heredoc below saw nothing and fell back to binding every interface —
+  # on hardware we do not own, and against the rule that this port is never
+  # 0.0.0.0. The diagnostic must not be the one thing that opens the socket.
+  RC="$rc" VLLM_BIND_HOST="$VLLM_BIND_HOST" python3 - <<'PYEOF'
 import json, os, re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -271,7 +312,11 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-print("[provision] failure endpoint listening on %s:8000" % os.environ.get("VLLM_BIND_HOST", "0.0.0.0"), flush=True)
-ThreadingHTTPServer((os.environ.get("VLLM_BIND_HOST") or "0.0.0.0", 8000), H).serve_forever()
+# Loopback, not 0.0.0.0, if the bind host is somehow missing: under userspace
+# networking that is the correct address anyway, and under TUN it makes the
+# endpoint unreachable — a visible failure, which is the better of the two.
+bind = os.environ.get("VLLM_BIND_HOST") or "127.0.0.1"
+print("[provision] failure endpoint listening on %s:8000" % bind, flush=True)
+ThreadingHTTPServer((bind, 8000), H).serve_forever()
 PYEOF
 fi

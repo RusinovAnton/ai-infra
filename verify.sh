@@ -256,10 +256,41 @@ elif grep -qE -- '--disable-log-requests' "$G"; then
 else
   bad "request logging is not disabled — prompts would land on hardware we do not own"
 fi
-grep -q -- '--tool-call-parser=qwen3_coder' "$G" && ok "tool-call parser is qwen3_coder, not hermes" \
-                                                 || bad "wrong or missing tool-call parser — agents get prose instead of tool_calls, silently"
-grep -q -- '--reasoning-parser=qwen3' "$G" && ok "reasoning parser present (required even on the non-thinking alias)" \
-                                           || bad "missing --reasoning-parser qwen3"
+# The parsers pair with MODEL_ID, so they now come from scripts/.env rather than
+# being baked in here. Three things to assert, not one: the flags are wired to
+# that environment, the environment actually sets them, and the values MATCH the
+# checkpoint. The last is the one that matters — a parser left behind after a
+# model swap returns prose where agents expect tool_calls, and fails silently.
+grep -qF -- '--tool-call-parser=${TOOL_CALL_PARSER' "$G" \
+  && ok "tool-call parser wired to TOOL_CALL_PARSER (pairs with MODEL_ID)" \
+  || bad "tool-call parser hardcoded in $G — it must pair with MODEL_ID or a model swap silently breaks tool calling"
+grep -qF -- '--reasoning-parser=${REASONING_PARSER' "$G" \
+  && ok "reasoning parser wired to REASONING_PARSER (required even on the non-thinking alias)" \
+  || bad "reasoning parser hardcoded in $G"
+
+mid="$(sed -nE 's/^MODEL_ID=(.+)$/\1/p' scripts/.env 2>/dev/null | head -1)"
+tcp="$(sed -nE 's/^TOOL_CALL_PARSER=(.+)$/\1/p' scripts/.env 2>/dev/null | head -1)"
+rsp="$(sed -nE 's/^REASONING_PARSER=(.+)$/\1/p' scripts/.env 2>/dev/null | head -1)"
+[ -n "$tcp" ] && ok "TOOL_CALL_PARSER is set (=$tcp)" \
+              || bad "TOOL_CALL_PARSER unset in scripts/.env — provision.sh aborts before the download"
+[ -n "$rsp" ] && ok "REASONING_PARSER is set (=$rsp)" \
+              || bad "REASONING_PARSER unset in scripts/.env"
+
+# Extend this case when a new checkpoint is introduced. An unknown MODEL_ID skips
+# rather than passes: silence here would defeat the point of the check.
+case "$mid" in
+  *GLM-4.7*)  want_tcp=glm47;       want_rsp=glm47 ;;
+  *Qwen3.6*)  want_tcp=qwen3_coder; want_rsp=qwen3 ;;
+  *)          want_tcp="";          want_rsp="" ;;
+esac
+if [ -n "$want_tcp" ]; then
+  [ "$tcp" = "$want_tcp" ] && ok "tool-call parser matches the model ($mid -> $tcp)" \
+    || bad "MODEL_ID=$mid needs TOOL_CALL_PARSER=$want_tcp, but it is '$tcp' — agents would get prose, silently"
+  [ "$rsp" = "$want_rsp" ] && ok "reasoning parser matches the model ($mid -> $rsp)" \
+    || bad "MODEL_ID=$mid needs REASONING_PARSER=$want_rsp, but it is '$rsp' — reasoning would land inside content"
+else
+  skip "parser/model pairing (unrecognised MODEL_ID='$mid' — add it to the case in verify.sh)"
+fi
 grep -q -- '--revision=' "$G" && ok "model pinned to a revision" || bad "model not pinned — a rebuild may fetch different weights"
 # TP=1 must not carry ipc: host, and TP>=2 must. Getting this backwards is a
 # cryptic NCCL failure, not a clear error.
@@ -474,13 +505,34 @@ skip "from a user device: tag:gpu:8000 must FAIL"
 skip "from the public internet: GPU node's public IP, any port — all refused"
 skip "from the GPU node: reach tag:gateway on 443/22/4000 — all must fail"
 skip "tailscale status on the gateway: GPU node reads 'direct', not 'relay'"
-skip "vLLM startup log: per-token KV in the ~20 KB class, not ~262 KB"
-skip "KV cache blocks at startup consistent with ~65k x ~6 streams (~410k tokens)"
 skip "Tailscale-User-Login present via serve, and STRIPPED when a client sends its own"
-# The chosen checkpoint carries a vision tower that is easy to overlook
-# (see gpu/docker-compose.yml). Peak VRAM is the measurement that decides
-# whether --limit-mm-per-prompt is worth setting.
-skip "peak VRAM vs the 43.2 GB budget — does the unused vision tower cost anything?"
+# These three are the numbers a human reads off the startup log, and every one of
+# them is checkpoint-specific: KV cost per token, streams the cache can back, and
+# the VRAM budget. Hardcoding the previous model's figures would print a stale
+# expectation that reads exactly like a measurement.
+case "$(sed -nE 's/^MODEL_ID=(.+)$/\1/p' scripts/.env 2>/dev/null | head -1)" in
+  *GLM-4.7*)
+    # MLA: (kv_lora_rank 512 + qk_rope 64) x 2 B x 47 layers.
+    skip "vLLM startup log: per-token KV in the ~54 kB class (MLA), NOT the ~20 kB Qwen figure"
+    # Measured on the first live boot, not predicted: /metrics reports
+    # kv_cache_size_tokens=549712 and kv_cache_max_concurrency=8.39 on a 96 GB
+    # card. A large drop means the engine sized the cache differently, and the
+    # whole concurrency story changes with it.
+    skip "KV cache at startup ~549,712 tokens / ~8.4 streams at 65k (96 GB card)"
+    # Text-only checkpoint, so there is no vision tower to account for. The
+    # measured cache implies ~29.7 GB of KV, ~9 GB more than the 62.4 GB BF16
+    # weight figure leaves room for — see docs/design-notes.md §11.
+    skip "peak VRAM vs the 86.4 GB budget (96 GB x 0.90) — reconcile weights vs the ~29.7 GB KV measured"
+    ;;
+  *)
+    skip "vLLM startup log: per-token KV in the ~20 KB class, not ~262 KB"
+    skip "KV cache blocks at startup consistent with ~65k x ~6 streams (~410k tokens)"
+    # The Qwen3.6 checkpoints carry a vision tower that is easy to overlook
+    # (see gpu/docker-compose.yml). Peak VRAM is the measurement that decides
+    # whether --limit-mm-per-prompt is worth setting.
+    skip "peak VRAM vs the 43.2 GB budget — does the unused vision tower cost anything?"
+    ;;
+esac
 
 head_ "20. Model behaviour on each alias"
 # REAL, not ENGINE_UP. Every assertion below is about what the *model and its
@@ -512,7 +564,7 @@ print(("reason" if msg.get("reasoning_content") else "noreason"),
       -H 'Content-Type: application/json' \
       -d "{\"model\":\"$alias\",\"messages\":[{\"role\":\"user\",\"content\":\"What is the weather in Berlin?\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]}" \
       | python3 -c 'import sys,json;print("yes" if json.load(sys.stdin)["choices"][0]["message"].get("tool_calls") else "no")' 2>/dev/null)
-    [ "$tc" = yes ] && ok "$alias: structured tool_calls, not prose" || bad "$alias: no tool_calls — check --tool-call-parser qwen3_coder"
+    [ "$tc" = yes ] && ok "$alias: structured tool_calls, not prose" || bad "$alias: no tool_calls — check TOOL_CALL_PARSER in scripts/.env matches MODEL_ID"
   done
 else
   skip "tool calling on each alias returns structured tool_calls"

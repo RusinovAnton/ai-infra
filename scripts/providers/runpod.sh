@@ -23,11 +23,23 @@ RP="${RUNPOD_API_BASE:-https://rest.runpod.io/v1}"
 # have the api.runpod.io/graphql scope enabled.
 RP_GQL="${RUNPOD_GRAPHQL:-https://api.runpod.io/graphql}"
 
-# rp_stock DATACENTER -> "<stockStatus> <price>", e.g. "Low 0.99" / "None -"
+# ONE default, exported, because both the pod request and the messages that
+# report what was requested read it. They disagreed once — the request sent
+# '13.0' while the failure message named '12.8,13.0' — which sent us looking at
+# a filter that had never been applied. `export`: the driver is sourced after
+# load_env's `set -a`, so a plain assignment would not reach python.
+export RUNPOD_CUDA_VERSIONS="${RUNPOD_CUDA_VERSIONS:-13.0}"
+
+# rp_stock DATACENTER [GPU_ID] -> "<stockStatus> <price>", e.g. "Low 0.99" / "None -"
+#
+# GPU_ID is explicit rather than read from $RUNPOD_GPU_TYPE, because that may
+# hold the sentinel "auto", which is not a gpuTypeId. Asking the provider about
+# "auto" answers "no capacity" for every datacenter — a free check that reports
+# nothing available while --list-gpus shows stock.
 rp_stock() {
-  local dc="$1" body
+  local dc="$1" gpu="${2:-$RUNPOD_GPU_TYPE}" body
   body="$(printf '{"query":"query($id:String!,$dc:String){ gpuTypes(input:{id:$id}) { lowestPrice(input:{gpuCount:%d,dataCenterId:$dc,secureCloud:true}) { stockStatus uninterruptablePrice } } }","variables":{"id":"%s","dc":"%s"}}' \
-      "${GPU_COUNT:-1}" "$RUNPOD_GPU_TYPE" "$dc")"
+      "${GPU_COUNT:-1}" "$gpu" "$dc")"
   curl -sS -m 30 -X POST "$RP_GQL" \
     -H "Authorization: Bearer $RUNPOD_API_KEY" -H 'Content-Type: application/json' \
     -d "$body" 2>/dev/null | python3 -c "
@@ -43,17 +55,45 @@ print('%s %s' % (st, '-' if pr is None else pr))
 }
 
 # Returns 0 if at least one configured datacenter has stock. Prints a report.
+#
+# "auto" is resolved to the same shortlist a launch would try, not passed through
+# as a gpu id. The check costs nothing and is the one people run BEFORE deciding
+# whether to launch, so answering "no capacity anywhere" when eight datacenters
+# hold stock is the most expensive kind of wrong this file can be.
 provider_capacity() {
-  local dc st pr any=1
-  log "${GPU_COUNT:-1} × ${RUNPOD_GPU_TYPE}, secure cloud:"
-  for dc in ${RUNPOD_DATACENTERS//,/ }; do
-    read -r st pr <<<"$(rp_stock "$dc")"
-    case "$st" in
-      None|unknown) log "  $dc  no capacity" ;;
-      *)            log "  $dc  stock=$st  \$$pr/hr"; any=0 ;;
-    esac
-  done
+  local dc st pr any=1 gpu gpus
+  gpus="$(rp_candidate_ids)" || return 1
+  while read -r gpu; do
+    [ -n "$gpu" ] || continue
+    log "${GPU_COUNT:-1} × ${gpu}, secure cloud:"
+    for dc in ${RUNPOD_DATACENTERS//,/ }; do
+      read -r st pr <<<"$(rp_stock "$dc" "$gpu")"
+      case "$st" in
+        None|unknown) log "  $dc  no capacity" ;;
+        *)            log "  $dc  stock=$st  \$$pr/hr"; any=0 ;;
+      esac
+    done
+  done <<EOF
+$gpus
+EOF
   return $any
+}
+
+# The gpu ids this configuration would actually try, cheapest first. Which cards
+# are SUITABLE is a property of the model, so the policy stays in common.sh
+# (gpu_shortlist); this only translates the "auto" sentinel into ids.
+rp_candidate_ids() {
+  case "${RUNPOD_GPU_TYPE:-auto}" in
+    ""|auto)
+      local list; list="$(gpu_shortlist | cut -f1)"
+      [ -n "$list" ] || {
+        log "nothing rentable meets the constraints (>=${GPU_MIN_VRAM_GB}GB, FP8-capable${GPU_MAX_PRICE:+, <= \$$GPU_MAX_PRICE/hr})" >&2
+        return 1
+      }
+      printf '%s\n' "$list"
+      ;;
+    *) printf '%s\n' "$RUNPOD_GPU_TYPE" ;;
+  esac
 }
 
 rp() { # rp METHOD PATH [JSON_BODY]
@@ -166,15 +206,19 @@ for x in v:
   # bills 24/7 from creation, so creating one where the GPU is unavailable buys
   # a monthly cost for hardware you cannot rent. This is the single most
   # expensive ordering mistake available here.
-  local st pr
-  read -r st pr <<<"$(rp_stock "$dc")"
+  # Same "auto" trap as provider_capacity, with worse consequences: a false
+  # "no capacity" here refuses to create the volume, and a false "capacity" pins
+  # one to a datacenter forever. Ask about the card a launch would actually pick.
+  local st pr gpu
+  gpu="$(rp_candidate_ids | head -1)" || return 1
+  read -r st pr <<<"$(rp_stock "$dc" "$gpu")"
   case "$st" in
     None|unknown)
-      log "$RUNPOD_GPU_TYPE has NO capacity in $dc right now (stock=$st)"
+      log "$gpu has NO capacity in $dc right now (stock=$st)"
       log "check other regions first:  ./scripts/gpu-up.sh --check-capacity"
       die "refusing to create a volume pinned to a datacenter that cannot run your GPU"
       ;;
-    *) log "capacity check: $dc has stock=$st at \$$pr/hr" ;;
+    *) log "capacity check: $dc has $gpu at stock=$st, \$$pr/hr" ;;
   esac
 
   log "creating a 200 GB network volume in $dc"
@@ -211,6 +255,11 @@ env = {
     'ENGINE_SECRET':  os.environ['ENGINE_SECRET'],
     'MODEL_ID':       os.environ['MODEL_ID'],
     'MODEL_REVISION': os.environ['MODEL_REVISION'],
+    # Required, not .get() with a default: the parsers pair with MODEL_ID, and a
+    # default here would silently serve prose to every agent. KeyError before the
+    # pod exists is the cheap failure.
+    'TOOL_CALL_PARSER':  os.environ['TOOL_CALL_PARSER'],
+    'REASONING_PARSER':  os.environ['REASONING_PARSER'],
     'MAX_MODEL_LEN':  os.environ.get('MAX_MODEL_LEN','65536'),
     'TP':             os.environ.get('TP','1'),
     'GPU_MEM_UTIL':   os.environ.get('GPU_MEM_UTIL','0.90'),
@@ -251,7 +300,7 @@ req = {
     # driver -- a 12.8 host fails with 'driver too old (found version 12080)'.
     # engine-preflight.sh prints the image's build so this stays honest when
     # the digest changes.
-    'allowedCudaVersions': os.environ.get('RUNPOD_CUDA_VERSIONS','13.0').split(','),
+    'allowedCudaVersions': os.environ['RUNPOD_CUDA_VERSIONS'].split(','),
     'interruptible':      False,
     'minVCPUPerGPU':      8,
     'minRAMPerGPU':       32,
@@ -351,7 +400,7 @@ print(json.dumps(d,indent=2))" >&2
       *"no instances"*|*"not available"*|*capacity*)
         # Global stock does not imply stock in OUR datacenters with OUR CUDA
         # filter. Not fatal: the next candidate may place.
-        log "no capacity for $gpu in ${RUNPOD_DATACENTERS} (with CUDA ${RUNPOD_CUDA_VERSIONS:-12.8,13.0}) — trying next candidate" >&2
+        log "no capacity for $gpu in ${RUNPOD_DATACENTERS} (with CUDA ${RUNPOD_CUDA_VERSIONS}) — trying next candidate" >&2
         continue
         ;;
     esac
@@ -370,7 +419,7 @@ EOF
     # looking at a limit that was not set.
     local hint="widen RUNPOD_DATACENTERS, lower GPU_MIN_VRAM_GB (now ${GPU_MIN_VRAM_GB:-48}), or wait"
     [ -n "${GPU_MAX_PRICE:-}" ] && hint="raise GPU_MAX_PRICE (now \$$GPU_MAX_PRICE/hr), $hint"
-    die "no candidate could be placed in ${RUNPOD_DATACENTERS} (with CUDA ${RUNPOD_CUDA_VERSIONS:-12.8,13.0}). Tried, in order: ${tried:-none} — $hint"
+    die "no candidate could be placed in ${RUNPOD_DATACENTERS} (with CUDA ${RUNPOD_CUDA_VERSIONS}). Tried, in order: ${tried:-none} — $hint"
   fi
   printf '%s' "$pod_id"
 }

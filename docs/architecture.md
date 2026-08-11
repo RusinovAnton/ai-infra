@@ -439,9 +439,14 @@ Details that bite:
 - **`--max-num-seqs=64`, not the 256 default.** One Mamba cache block is
   allocated per decode sequence on this architecture, and 256 of them does not
   fit beside a 65k context on 48 GB.
-- **`--tool-call-parser qwen3_coder`, not `hermes`.** A wrong parser returns
-  prose where agents expect `tool_calls` and **fails silently** — aider will not
-  surface it because it uses text diffs; opencode and Claude Code will.
+- **The tool-call and reasoning parsers pair with `MODEL_ID`.** Both come from
+  `scripts/.env`, set immediately beside the model and its revision, because they
+  are one decision with it: `qwen3_coder` / `qwen3` for Qwen3.6, `glm47` / `glm47`
+  for GLM-4.7-Flash, never `hermes` for either. A wrong parser returns prose
+  where agents expect `tool_calls` and **fails silently** — aider will not
+  surface it because it uses text diffs; opencode and Claude Code will. `verify.sh`
+  checks the pairing, not just the presence of the flags, because the failure mode
+  is a model swap that leaves the old parser behind.
 - **`--gpu-memory-utilization` is a fraction of the whole card**, not of what
   remains. 0.90 is safe only because this is the only engine.
 - **`ipc: host` the same day a second GPU arrives.** TP=1 does not need it;

@@ -77,6 +77,39 @@ than the fix. Anything that can only be read from a live machine must be pushed
 somewhere durable *before* the machine is destroyed — and shutting down to stop
 the bleeding is the moment you are most likely to lose it.
 
+### The failure endpoint says nothing while the engine is still loading
+
+**What it looked like.** Pod `RUNNING`, tagged and online, `gpu-up.sh` printing
+dots. No `503`, no root cause, no console output — nothing at all. Waited about
+twice the usual cold start, concluded it was wedged, and destroyed the pod by
+hand. A GPU-hour, and no more evidence than at the start.
+
+**What was true.** Nothing had failed. The `503`/`X-Engine-Failed` path above
+only exists **after** vLLM *exits*; while it is downloading weights or loading
+them into VRAM, the endpoint does not exist and the port simply refuses. So a
+slow load and a hung load produce byte-identical output, and there is no log
+path off the node to tell them apart — `--ssh=false`, the ACL permits only
+gateway→`:8000`, and the provider's REST API has no logs endpoint. The design
+deliberately leaves no way in, which also means no way to watch.
+
+Nothing in that picture said the checkpoint had changed. `MODEL_ID` had moved to
+GLM-4.7-Flash — 62.4 GB instead of ~35 GB — and with no network volume every
+cold start refetches all of it. The wait that looked abnormal was the new normal
+for a checkpoint nearly twice the size.
+
+**What changed.** Nothing in code — there is no honest signal to add without
+opening a path off the node, which is the thing the trust model is built on.
+What changed is the expectation: **a measured baseline, so "too long" is a
+number rather than a feeling.** GLM-4.7-Flash, 96 GB Blackwell, no volume,
+weights cold: pod create → `/v1/models` 200 in **3m37s**. Multiply by whatever
+the download link deserves, not by memory of the previous checkpoint.
+
+**The general lesson.** A failure reporter that requires the process to *exit*
+covers crashes and nothing else. Hanging, thrashing, and merely-slow all present
+as silence, and silence is the same shape as progress. Before waiting on a
+system with no telemetry, know what its normal looks like in seconds — and
+re-measure it the moment an input as large as the model changes.
+
 ### The weights volume made the launch impossible, not faster
 
 **What it looked like.** `create pod: get attached volume: network volume not

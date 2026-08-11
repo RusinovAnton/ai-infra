@@ -185,6 +185,75 @@ because the wrong version is the one a reader is likely to arrive with.
    checked sends the next person to the wrong file; `Tried, in order: …` would
    have made this a ten-second read.
 
+10. **The engine flags encoded assumptions about *one* checkpoint, and swapping
+    `MODEL_ID` was documented as if it were free** (found 2026-08-11, adding
+    GLM-4.7-Flash as a test model). `scripts/.env.example` said the 27B A/B was
+    "`MODEL_ID` and `MODEL_REVISION` in `scripts/.env`, no hardware change" — true
+    for that swap, and it generalised badly.
+
+    Three things were baked in beside the model rather than with it. The
+    tool-call and reasoning parsers were literals in two files
+    (`qwen3_coder` / `qwen3`), so a model swap left them behind — and a wrong
+    parser returns prose where agents expect `tool_calls`, silently. `verify.sh`
+    asserted those literals, which meant the check would go red on any correct
+    swap and green on an incorrect one. And the provenance gate compared the
+    publishing org to the string `Qwen`, so the guard against a typo'd or hostile
+    `MODEL_ID` was also the guard against ever using a different publisher.
+
+    Now `TOOL_CALL_PARSER` and `REASONING_PARSER` sit next to `MODEL_ID` in
+    `scripts/.env` with no defaults — an unset parser aborts `provision.sh` before
+    the download rather than serving prose — and `verify.sh` checks the *pairing*
+    against a case statement instead of a literal. The provenance allowlist stays
+    hardcoded in `gpu/provision.sh` on purpose: widening it should be a reviewed
+    change, because "which orgs may put weights on hardware we do not own" is not
+    the same kind of decision as "which model".
+
+    The general shape is worth keeping: a config value that is genuinely one
+    decision with another belongs *beside* it, and a check that asserts today's
+    value rather than today's *invariant* fails in both directions.
+
+11. **The sizing policy in `common.sh` is FP8-shaped, and GLM-4.7-Flash is not**
+    (2026-08-11). `GPU_MIN_VRAM_GB=48` and the `GPU_FP8_FAMILIES` allowlist both
+    encode the primary checkpoint: ~35 GB of FP8 weights on one Ada card. BF16
+    GLM-4.7-Flash is 62.4 GB and fits neither.
+
+    What the arithmetic actually says, at 0.90 utilisation and 54.1 kB/token of
+    MLA KV — `(kv_lora_rank 512 + qk_rope 64) × 2 B × 47 layers`, so 3.55 GB per
+    65k stream:
+
+    | card | VRAM | $/hr | weights | KV left | 65k streams |
+    |---|---|---|---|---|---|
+    | RTX PRO 6000 Blackwell | 96 GB | 2.09 | 62.4 GB BF16 | ~21 GB | ~5.9 |
+    | H100 80GB HBM3 | 80 GB | 3.29 | 62.4 GB BF16 | ~6.6 GB | ~1.9 |
+    | L40S + community AWQ | 48 GB | 0.99 | 19.8 GB | ~20 GB | ~5.7 |
+
+    The 80 GB H100 is the trap: it clears the "80 GB" bar, costs 1.6× the 96 GB
+    Blackwell, and delivers a third of the concurrency. VRAM minus weights is the
+    number that matters, and a floor expressed as total VRAM hides it.
+
+    The 48 GB path exists but is not free: every quantised GLM-4.7-Flash
+    checkpoint is published by an individual repackager, not by zai-org, so
+    it trades ~$10/day for trusting someone who did not train the weights.
+    That is why the allowlist names original publishers only.
+
+    **Measured 2026-08-11, and the table above is pessimistic.** First live boot
+    on an RTX PRO 6000 Blackwell *Workstation* Edition (96 GB, $1.89/hr — the
+    Server Edition would not place):
+
+    | | predicted | measured |
+    |---|---|---|
+    | KV cache | ~390k tokens | **549,712** (34,357 blocks × 16) |
+    | 65k streams | ~5.9 | **8.39** |
+    | cold start | — | 3m37s, pod create → `/v1/models` 200 |
+
+    The two inputs do not reconcile: 549,712 tokens at 54.1 kB/token is 29.7 GB
+    of KV, which leaves ~56.7 GB for weights at 0.90 of 96 GB — about 6 GB less
+    than the 62.4 GB the BF16 parameter count predicts. So either the per-token
+    MLA cost is lower than the layer arithmetic says, or the checkpoint is not
+    uniformly BF16. Not chased, because it errs in our favour and the number that
+    governs sizing is the measured one. Worth resolving before trusting the
+    80 GB row, where a 6 GB error is the whole margin.
+
 ## The provider boundary
 
 The gateway knows one thing about the engine: a URL. That is the whole coupling,

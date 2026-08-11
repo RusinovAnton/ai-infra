@@ -61,13 +61,18 @@ services:
       # Renamed by vLLM from --disable-log-requests. Must match provision.sh.
       - --no-enable-log-requests                 # no prompts on disk, on hardware we do not own
       - --enable-auto-tool-choice
-      # qwen3_coder, NOT hermes. A wrong parser returns prose where agents
-      # expect tool_calls and fails SILENTLY — aider will not surface it
-      # because it uses text diffs; opencode and Claude Code will.
-      - --tool-call-parser=qwen3_coder
+      # Both come from scripts/.env, beside MODEL_ID, because they are ONE
+      # decision with it. A wrong parser returns prose where agents expect
+      # tool_calls and fails SILENTLY — aider will not surface it because it uses
+      # text diffs; opencode and Claude Code will.
+      #   GLM-4.7-Flash -> glm47        (emits <tool_call>name<arg_key>k</arg_key>…)
+      #   Qwen3.6       -> qwen3_coder  (NOT hermes)
+      # `:?` and no default: an unset parser is a silent wrong-output bug, which
+      # is exactly what keeping these beside the model is meant to prevent.
+      - --tool-call-parser=${TOOL_CALL_PARSER:?set in scripts/.env, beside MODEL_ID}
       # Required even on the non-thinking alias. Without it reasoning text
       # lands inside `content`.
-      - --reasoning-parser=qwen3
+      - --reasoning-parser=${REASONING_PARSER:?set in scripts/.env, beside MODEL_ID}
       # If CUDA graph capture fails, this is the knob — the default (512) can
       # exceed the Mamba cache size on this architecture.
       # - --max-cudagraph-capture-size=256
