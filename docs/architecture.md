@@ -288,6 +288,14 @@ per token, BF16:
 | Qwen2.5-Coder-32B | 64 / 64 | **262 KB** |
 | Qwen3.6-27B | 16 / 64 | ~64 KB |
 | Qwen3.6-35B-A3B | ~10 / 40 | **~20 KB** |
+| Qwen3.5-122B-A10B | 12 / 48 | ~24 KB |
+
+The 122B row is the useful one for intuition: 3.5× the parameters of the 35B for
+20% more KV per token, because KV tracks full-attention layers and KV heads, not
+model size. What the column does *not* carry is the recurrent state, which is per
+*sequence* rather than per token: ~151 MB per sequence on the 122B, enough that
+`--max-num-seqs` stops being a ceiling and becomes a sizing decision. See
+[devops-setup.md §10.2](devops-setup.md#102-max_num_seqs-is-a-sizing-decision-not-a-ceiling).
 
 A 13× reduction against a classic-attention model of similar size. This is the
 whole reason a single card is viable, which is why the KV-profiling check in
@@ -322,6 +330,38 @@ no FP8, and 35 GB exceeds 24 GB even sharded.)
 If only Ampere is orderable, the contingency is 2 × A6000/A40 on BF16 from day
 one. What is not acceptable is ordering Ampere and serving the FP8 checkpoint
 anyway.
+
+**The constraint is on the checkpoint, not on the hardware**, which is easy to
+read backwards from this section. A checkpoint that does not use FP8 does not care
+what the tensor cores can do, and there is now a config that leans on exactly
+that: Qwen3.5-122B-A10B GPTQ-Int4 on 2 × A6000, where Ampere costs nothing and
+the pair is less than half the price of 2 × L40S
+([devops-setup.md §10](devops-setup.md#10-the-big-model-qwen35-122b-a10b-on-2--a6000-or-2--l40s)).
+So `GPU_FP8_FAMILIES` is a *model-dependent* allowlist that happens to be pinned
+to FP8 today, and widening it to Ampere is correct only while `MODEL_ID` is a
+non-FP8 checkpoint. `verify.sh` fails the combination rather than trusting anyone
+to remember, because the failure it prevents — Ampere rented to serve FP8 — is
+invisible at runtime.
+
+### Big-model candidate: Qwen3.5-122B-A10B (2 cards)
+
+A different axis from the 27B A/B: more total capability at 3× the activated
+parameters, on two cards instead of one. Only the GPTQ-Int4 build fits 96 GB
+(65.05 GB, against ~127 GB for FP8 and ~250 GB for BF16), so this is an INT4
+config — but an INT4 config of an **official Qwen checkpoint**, which is what
+separates it from the community-quant route in §9 and keeps the provenance
+allowlist in `gpu/provision.sh` untouched.
+
+The case against it is the same case that chose the MoE over the dense 27B, and it
+applies with more force: 10B activated against 3B is slower per stream, and a
+config that is slower has to lose a real task class to be worth adopting. Treat
+it as the answer to "the 35B cannot do this at all", measured with
+`scripts/bench.sh`, not to "the 35B could be better".
+
+And it costs a generation. Qwen3.6 exists only as 27B and 35B-A3B — there is no
+3.6 large MoE — so this config trades 3.6's coding and agentic gains for parameter
+count, on top of the throughput trade. Two things moving at once is why the
+decision here is a bench run and not a table.
 
 ### Two aliases, one engine
 

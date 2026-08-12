@@ -230,12 +230,34 @@ if [ -n "${VLLM_LIMIT_MM:-}" ]; then
   VLLM_ARGS+=( --limit-mm-per-prompt "$VLLM_LIMIT_MM" )
 fi
 
+# QUANTIZED-MoE CHECKPOINTS ONLY, and only where the publisher names a kernel.
+#
+# Unset for the FP8 and BF16 checkpoints: vLLM reads FP8 out of config.json and
+# takes the right path on its own, and passing a kernel name there would override
+# a correct choice with a guess.
+#
+# It is NOT optional for Qwen3.5-122B-A10B-GPTQ-Int4 — Qwen publishes
+# `--quantization moe_wna16` in every launch command for it. Left off, vLLM picks
+# gptq_marlin from the config's quant_method, which is the dense-GPTQ path rather
+# than the MoE one. Set it in scripts/.env beside MODEL_ID; gpu/docker-compose.yml
+# carries the same flag commented for the VM path, and the two must not drift.
+if [ -n "${VLLM_QUANTIZATION:-}" ]; then
+  log "quantization kernel named explicitly: $VLLM_QUANTIZATION"
+  VLLM_ARGS+=( --quantization "$VLLM_QUANTIZATION" )
+fi
+
 if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
   log "docker present — starting vLLM via compose"
   cd "$(dirname "$0")"
+  # MAX_NUM_SEQS and VLLM_QUANTIZATION are forwarded, not left to the compose
+  # defaults: both are checkpoint-specific, and on the 2-card INT4 config
+  # max_num_seqs is what decides whether KV cache exists at all (~151 MB of
+  # recurrent state per sequence). A compose default silently 4x-ing it would be
+  # the same class of bug as a stale parser.
   VLLM_BIND_HOST="$VLLM_BIND_HOST" HF_HOME="$HF_HOME_HOST" \
   MODEL_ID="$MODEL_ID" MODEL_REVISION="$MODEL_REVISION" \
   MAX_MODEL_LEN="$MAX_MODEL_LEN" TP="$TP" ENGINE_SECRET="$ENGINE_SECRET" \
+  MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}" VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-}" \
   TOOL_CALL_PARSER="$TOOL_CALL_PARSER" REASONING_PARSER="$REASONING_PARSER" \
     docker compose up -d
   log "vLLM starting under compose. Readiness is /v1/models -> 200, NOT tag:gpu online."

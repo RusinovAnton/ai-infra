@@ -43,6 +43,11 @@ provider_create() {
   log "       image      ${ENGINE_IMAGE}" >&2
   log "       model      ${MODEL_ID}@${MODEL_REVISION}" >&2
   log "       --api-key  the ENGINE_SECRET in gateway/.env" >&2
+  # Named here rather than left to provision.sh, because a human following this
+  # list is exactly who would omit it — and omitting it on the GPTQ MoE
+  # checkpoint is a throughput loss with no error attached.
+  [ -n "${VLLM_QUANTIZATION:-}" ] && \
+    log "       --quantization ${VLLM_QUANTIZATION}  (required for this checkpoint)" >&2
   log "       --port 8000, bound so only the tailnet reaches it" >&2
   log "" >&2
   log "  gpu/provision.sh does all of this; copy it to the machine and run it." >&2

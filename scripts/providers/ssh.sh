@@ -85,6 +85,12 @@ TOOL_CALL_PARSER=${TOOL_CALL_PARSER:?set in scripts/.env, beside MODEL_ID}
 REASONING_PARSER=${REASONING_PARSER:?set in scripts/.env, beside MODEL_ID}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-65536}
 TP=${TP:-1}
+# Both read by gpu/docker-compose.yml on the far side. MAX_NUM_SEQS was missing
+# here, so a two-card config that lowers it — see docs/devops-setup.md §10.2,
+# where it decides whether KV cache exists — silently got the compose default of
+# 64 instead. VLLM_QUANTIZATION is empty except on the GPTQ MoE checkpoint.
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-64}
+VLLM_QUANTIZATION=${VLLM_QUANTIZATION:-}
 HF_HOME_HOST=${GPU_SSH_DIR}/hf-cache
 EOF
 
