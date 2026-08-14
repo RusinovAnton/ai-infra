@@ -581,6 +581,19 @@ case "$(sed -nE 's/^MODEL_ID=(.+)$/\1/p' scripts/.env 2>/dev/null | head -1)" in
     skip "startup log names moe_wna16 — NOT a fall back to gptq_marlin"
     skip "peak VRAM vs the 86.4 GB budget (2 x 48 GB x 0.90) against 65.05 GB of weights"
     ;;
+  *Qwen3.6-27B*)
+    # Dense, 16/64 full-attention layers against the MoE's ~10/40 — so ~3x the
+    # per-token KV of the primary on the SAME card. Reading the ~20 kB figure
+    # here would look like the sizing held when it did not.
+    skip "vLLM startup log: per-token KV in the ~64 kB class, NOT the ~20 kB 35B-A3B figure"
+    # Predicted, not measured: 30.9 GB of weights against the 43.2 GB budget
+    # leaves ~12 GB, and ~12 GB at ~64 kB/token is ~190k. If the real number
+    # lands near the MoE's ~410k, the concurrency case for the A/B is wrong in
+    # our favour and worth writing down.
+    skip "KV cache at startup ~190k tokens / ~3 streams at 65k (48 GB card) — predicted, confirm on first boot"
+    # Same vision tower as the primary; same overlooked reservation.
+    skip "peak VRAM vs the 43.2 GB budget — does the unused vision tower cost anything?"
+    ;;
   *)
     skip "vLLM startup log: per-token KV in the ~20 KB class, not ~262 KB"
     skip "KV cache blocks at startup consistent with ~65k x ~6 streams (~410k tokens)"
