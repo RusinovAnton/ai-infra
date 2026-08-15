@@ -209,6 +209,56 @@ API — every path 400s with "does not exist in the specification". They live on
 the GraphQL endpoint, which needs its own scope on the API key. Do not conclude a
 capability is missing because one API surface lacks it.
 
+### A refused write arrives as no bytes at all, and we printed it
+
+**What it looked like.** `gpu-up.sh` rotated the engine secret, logged `creating
+pod: 1 × NVIDIA L40S in EU-SE-1,EU-NL-1,EU-RO-1`, printed **a blank line**, and
+died with `pod creation failed — see the provider response above`. There was no
+response above. `--check-capacity` said EU-NL-1 had L40S stock at $0.99/hr, so
+the one explanation the message pointed at was already ruled out.
+
+**What was true.** `POST /pods` returned **HTTP 403 with a zero-byte body**, and
+`rp()` returned only the body — the status was thrown away inside curl. So an
+account-side refusal was rendered as an empty string and reported as a generic
+failure. The tell was available the whole time and we could not see it: a
+*malformed* request to the same endpoint gets a long JSON 400 naming the exact
+field, so **no body at all is itself the signal** — it means the request never
+reached validation.
+
+**What changed.** `rp()` now records the status in `RP_HTTP` and `provider_create`
+names a 403 for what it is, with billing / key-permissions / account-hold as the
+three things to check. `provider_destroy` checks it too — a refused DELETE
+previously read as success and then merely "still listed after 60 s", while the
+pod went on billing.
+
+**The trap in the fix.** `RP_HTTP` is set inside `rp()`, and
+`resp="$(rp POST …)"` runs it in a **subshell** — the variable dies with the
+subshell and the caller reads an empty string. The call site had to become a
+redirect into a temp file. A global set by a function is invisible to the caller
+that used command substitution to call it; this looks like the helper is broken.
+
+**What it actually was.** A read-only API key — and the console showed that same
+key as read/write, so the console was not evidence. The pair of calls that
+settles it in one second, against an id that cannot exist:
+
+```
+GET    /pods/zzzz  ->  404  {"error":"pod not found"}   read reached the lookup
+DELETE /pods/zzzz  ->  403  0 bytes                     write rejected before it
+```
+
+Rejected *before* the not-found lookup, on a bogus id, means the refusal is
+endpoint-wide authorization and has nothing to do with pods, capacity, or the
+request. `--check-capacity` now runs exactly this and says so, because it was
+free to ask the whole time — and it is the check that would have replaced this
+entire diagnosis with one line.
+
+**The general lesson.** An error path that discards the status code can only ever
+produce "it failed". Capture the status even when you do not plan to use it — the
+one time it matters, it is the only thing that distinguishes *not allowed* from
+*not available*, and those two have opposite fixes. And when you want to know
+whether a credential may write, ask it to write to something that does not exist:
+the answer is free, and *which* error you get back is the whole signal.
+
 ---
 
 ## Tailscale
@@ -329,6 +379,14 @@ check on startup, which blocked `--create-storage` — whose entire purpose is t
 produce the missing value — and would have blocked `gpu-down.sh`, turning a
 cosmetic config problem into an unbounded bill. *Never let a validation failure
 prevent shutting something down.*
+
+And match the placeholder **anywhere in the value**, not as the whole value. The
+guard was anchored — `^[A-Z_]+=CHANGE-ME$` — while the example file prefills
+shapes, so `TS_AUTHKEY=tskey-auth-CHANGE-ME` looked filled in and sailed through.
+That one does not fail at the provider: the pod is created and billed, joins
+nothing, and surfaces thirty minutes later as "the engine never answered". Our own
+assumption was the bug — we wrote the example file *and* the guard, and did not
+notice they disagreed about what an unfilled field looks like.
 
 ---
 

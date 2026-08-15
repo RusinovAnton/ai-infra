@@ -62,6 +62,13 @@ print('%s %s' % (st, '-' if pr is None else pr))
 # hold stock is the most expensive kind of wrong this file can be.
 provider_capacity() {
   local dc st pr any=1 gpu gpus
+  case "$(rp_write_check)" in
+    yes) log "API key: writes permitted" ;;
+    no)  log "API key: READ-ONLY — every write returns HTTP 403 with an empty body."
+         log "  A launch gets as far as rotating the engine secret and then fails."
+         log "  Fix the key's permissions before renting anything." ;;
+    *)   log "API key: could not determine write permission (no answer from the API)" ;;
+  esac
   gpus="$(rp_candidate_ids)" || return 1
   while read -r gpu; do
     [ -n "$gpu" ] || continue
@@ -96,16 +103,58 @@ rp_candidate_ids() {
   esac
 }
 
+# Body on stdout, HTTP status in RP_HTTP.
+#
+# The status is not a nicety. This API answers some refusals with a status code
+# and NOTHING ELSE: a write the account is not permitted to make comes back 403
+# with a zero-byte body. A helper that returns only the body turns that into a
+# blank line, and the caller's "see the provider response above" then points at
+# nothing — which is how a permissions problem reads exactly like a malformed
+# request. Malformed requests, by contrast, get a long JSON 400 naming the
+# field, so "no body at all" is itself the signal.
+RP_HTTP=""
 rp() { # rp METHOD PATH [JSON_BODY]
-  local method="$1" path="$2" body="${3:-}"
+  local method="$1" path="$2" body="${3:-}" out rc=0
+  out="$(mktemp)"
   if [ -n "$body" ]; then
-    curl -sS -m 120 -X "$method" "$RP$path" \
+    RP_HTTP="$(curl -sS -m 120 -X "$method" "$RP$path" \
       -H "Authorization: Bearer $RUNPOD_API_KEY" \
-      -H 'Content-Type: application/json' -d "$body"
+      -H 'Content-Type: application/json' -d "$body" \
+      -o "$out" -w '%{http_code}')" || rc=$?
   else
-    curl -sS -m 120 -X "$method" "$RP$path" \
-      -H "Authorization: Bearer $RUNPOD_API_KEY"
+    RP_HTTP="$(curl -sS -m 120 -X "$method" "$RP$path" \
+      -H "Authorization: Bearer $RUNPOD_API_KEY" \
+      -o "$out" -w '%{http_code}')" || rc=$?
   fi
+  cat "$out"
+  rm -f "$out"
+  return $rc
+}
+
+# Prints yes / no / unknown: may this key WRITE? Free, and it touches no real
+# resource — a DELETE against an id that cannot exist.
+#
+# The discrimination is the point. GET on the same bogus id answers 404 with a
+# JSON body, so the read reached the lookup. A key without write scope answers
+# 403 with ZERO bytes, rejected before the lookup happens. The pair separates
+# "not allowed" from "not there", and costs nothing to ask.
+#
+# Worth asking because the alternative is finding out at pod-creation time, after
+# the engine secret has been rotated and a launch is half done — and because the
+# provider console can show a key as read/write while the API disagrees. That is
+# not hypothetical; it is what sent us hunting through billing for an hour.
+#
+# LIMIT, and it matters if you are scoping a key down: this probes DELETE /pods,
+# not POST /pods. A key restricted per-operation could permit one and refuse the
+# other, and this would call it green. A full-access key gives a truthful answer;
+# a scoped one is only confirmed by an actual launch.
+rp_write_check() {
+  rp DELETE "/pods/rp-write-probe-nonexistent" >/dev/null 2>&1 || true
+  case "$RP_HTTP" in
+    403)      printf 'no' ;;
+    2*|4*|5*) printf 'yes' ;;   # 404 is the expected pass: allowed, nothing there
+    *)        printf 'unknown' ;;   # no answer at all — network, not permission
+  esac
 }
 
 provider_preflight() {
@@ -391,7 +440,8 @@ print(json.dumps(d,indent=2))" >&2
     return 0
   fi
 
-  local resp pod_id gpu tried
+  local resp http pod_id gpu tried respfile
+  respfile="$(mktemp)"
   pod_id=""
   tried=""
   while read -r gpu; do
@@ -400,9 +450,31 @@ print(json.dumps(d,indent=2))" >&2
     tried="${tried:+$tried, }$gpu"
     body="$(rp_pod_body)"
     log "creating pod: ${GPU_COUNT:-1} × ${RUNPOD_GPU_TYPE} in ${RUNPOD_DATACENTERS}" >&2
-    resp="$(rp POST /pods "$body")"
+    # Redirect, NOT resp="$(rp ...)". Command substitution runs rp in a subshell,
+    # so the status it records in RP_HTTP is discarded along with that subshell —
+    # the caller reads an empty string and the whole point is lost.
+    rp POST /pods "$body" > "$respfile"
+    resp="$(cat "$respfile")"; http="$RP_HTTP"
     pod_id="$(printf '%s' "$resp" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
     [ -n "$pod_id" ] && break
+    # 403 with an empty body is the account refusing the write, not the fleet
+    # being full — retrying the next card repeats it 8 times and then blames
+    # capacity. Distinguishable only by the status, which is why rp() keeps it.
+    if [ "$http" = 403 ]; then
+      log "HTTP 403 from POST /pods, empty body" >&2
+      die "the provider refused to create a pod: authenticated, but not permitted to.
+  Reads work with this same key (GET /pods returns 200), and the request itself is
+  well-formed — a malformed one gets a 400 naming the field. Ordered by what this
+  has actually turned out to be:
+    1. the API key cannot write. A key scoped read-only, or scoped to the wrong
+       resource, reads fine and 403s every write. THE CONSOLE MAY SHOW IT AS
+       READ/WRITE ANYWAY — do not treat that as evidence. Confirm with
+       './scripts/gpu-up.sh --check-capacity', which reports it for free.
+    2. billing — no payment method, zero balance, or a spend limit reached
+    3. the account is restricted (region/verification hold)
+  A second opinion in words: the GraphQL deploy mutation answers 'UNAUTHORIZED'
+  where this endpoint sends nothing at all."
+    fi
     case "$resp" in
       *"no instances"*|*"not available"*|*capacity*)
         # Global stock does not imply stock in OUR datacenters with OUR CUDA
@@ -411,7 +483,7 @@ print(json.dumps(d,indent=2))" >&2
         continue
         ;;
     esac
-    printf '%s\n' "$resp" >&2
+    printf 'HTTP %s\n%s\n' "${http:-?}" "${resp:-<empty response body>}" >&2
     if [ -n "${RUNPOD_VOLUME_ID:-}" ]; then
       die "pod creation failed. Note a network volume pins this pod to one datacenter, so the other entries in RUNPOD_DATACENTERS cannot be used while RUNPOD_VOLUME_ID is set."
     fi
@@ -419,6 +491,7 @@ print(json.dumps(d,indent=2))" >&2
   done <<EOF
 $candidates
 EOF
+  rm -f "$respfile"
   if [ -z "$pod_id" ]; then
     show_offers >&2
     # Name what was actually tried, and only suggest knobs that are in play.
@@ -437,6 +510,13 @@ provider_destroy() { # provider_destroy ID
   # volume survives.
   rp DELETE "/pods/$1" >/dev/null \
     || die "terminate call failed — check the provider console before assuming it is down"
+  # A refused DELETE returns no body, so without the status this reads as success
+  # and then merely "still listed after 60 s". The pod goes on billing either
+  # way; the difference is whether the operator is told to go and kill it.
+  case "$RP_HTTP" in
+    2*) ;;
+    *)  die "terminate refused: HTTP $RP_HTTP. The pod is STILL RUNNING AND BILLING — kill it in the provider console now." ;;
+  esac
   local i
   for i in $(seq 1 20); do
     [ -z "$(provider_find || true)" ] && { log "pod gone"; return 0; }

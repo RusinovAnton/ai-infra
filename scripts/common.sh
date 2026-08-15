@@ -60,7 +60,12 @@ check_placeholders() {
   # propagates that, and set -e then kills the script — silently, because here
   # "no matches" is the SUCCESS case. Without it this function aborts every
   # caller precisely when the config is correct.
-  names="$(grep -hE '^[A-Z_]+=CHANGE-ME[[:space:]]*$' "$SCRIPTS_DIR/.env" "$GATEWAY_DIR/.env" 2>/dev/null | cut -d= -f1 | tr '\n' ' ' || true)"
+  # CHANGE-ME ANYWHERE in the value, not only as the whole value. The example
+  # file prefills shapes — TS_AUTHKEY=tskey-auth-CHANGE-ME — so an anchored
+  # match saw a filled-in field and passed. That one reached the provider: the
+  # pod was created, billed, and could never join the tailnet, which presents as
+  # "the engine never answered" half an hour later.
+  names="$(grep -hE '^[A-Z_]+=.*CHANGE-ME' "$SCRIPTS_DIR/.env" "$GATEWAY_DIR/.env" 2>/dev/null | cut -d= -f1 | tr '\n' ' ' || true)"
   [ -z "$names" ] || die "unfilled placeholder(s): ${names}— set them in scripts/.env (or gateway/.env) before running this"
 }
 

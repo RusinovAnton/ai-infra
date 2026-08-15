@@ -49,7 +49,12 @@ fi
 # Everything below creates something, so the config must be complete. The
 # storage branch above deliberately runs before this: it is how you fill in the
 # value this check demands.
-check_placeholders
+#
+# --dry-run is exempt for the same reason: it creates nothing, and it is what you
+# run WHILE filling the config in. Gating it also cost real coverage — verify.sh
+# exercises the pod-request build through this flag, and a placeholder anywhere
+# in scripts/.env turned that assertion into a silent skip.
+[ "$MODE" = dry ] || check_placeholders
 
 # ------------------------------------------------------------ idempotence
 
