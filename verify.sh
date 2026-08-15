@@ -280,7 +280,7 @@ rsp="$(sed -nE 's/^REASONING_PARSER=(.+)$/\1/p' scripts/.env 2>/dev/null | head 
 # rather than passes: silence here would defeat the point of the check.
 case "$mid" in
   *GLM-4.7*)  want_tcp=glm47;       want_rsp=glm47 ;;
-  *Qwen3.6*)  want_tcp=qwen3_coder; want_rsp=qwen3 ;;
+  *Qwen3.6*|*Qwen3.8*)  want_tcp=qwen3_coder; want_rsp=qwen3 ;;
   # Qwen3.5-122B-A10B: same parsers as 3.6, and the same values Qwen publishes in
   # their own vLLM launch commands for it.
   *Qwen3.5*)  want_tcp=qwen3_coder; want_rsp=qwen3 ;;
@@ -581,10 +581,14 @@ case "$(sed -nE 's/^MODEL_ID=(.+)$/\1/p' scripts/.env 2>/dev/null | head -1)" in
     skip "startup log names moe_wna16 — NOT a fall back to gptq_marlin"
     skip "peak VRAM vs the 86.4 GB budget (2 x 48 GB x 0.90) against 65.05 GB of weights"
     ;;
-  *Qwen3.6-27B*)
+  *Qwen3.6-27B*|*Qwen3.8-27B*)
     # Dense, 16/64 full-attention layers against the MoE's ~10/40 — so ~3x the
     # per-token KV of the primary on the SAME card. Reading the ~20 kB figure
     # here would look like the sizing held when it did not.
+    #
+    # Qwen3.8-27B shares this branch because it shares the geometry EXACTLY:
+    # 64 layers, full_attention_interval 4, 4 KV heads, head_dim 256, and a
+    # 30.9 GB FP8 checkpoint. Same arithmetic, so the same three numbers apply.
     skip "vLLM startup log: per-token KV in the ~64 kB class, NOT the ~20 kB 35B-A3B figure"
     # Predicted, not measured: 30.9 GB of weights against the 43.2 GB budget
     # leaves ~12 GB, and ~12 GB at ~64 kB/token is ~190k. If the real number
