@@ -419,6 +419,95 @@ notice they disagreed about what an unfilled field looks like.
 
 ---
 
+## Models and chat templates
+
+### A checkpoint's chat template is several contracts, not one
+
+> **Status: the symptom below is unexplained.** The template inversion this entry
+> documents is real and verified, but it is a property of `Qwen3.8-27B`, and at
+> the time of writing `scripts/.env` still points at `Qwen3.6-35B-A3B-FP8`, whose
+> template does *not* have it. So it is written down as a trap that is now
+> guarded against, **not** as the cause of the warnings. Do not close the
+> investigation on it. What is genuinely established: the tool-call format is
+> byte-identical across these checkpoints, so `TOOL_CALL_PARSER` is not the
+> suspect it first appears to be.
+
+**What it looked like.** Agents intermittently got tool calls they could not
+execute. The gateway log showed, on otherwise successful requests:
+
+```
+INFO:  "POST /v1/chat/completions HTTP/1.1" 200 OK
+LiteLLM:WARNING: factory.py:5380 - Failed to parse tool call arguments for tool
+'write' (chat completions). Error: Expecting value: line 1 column 1 (char 0).
+```
+
+`200 OK`. Only `write`, `edit` and `bash` — never a short single-argument tool.
+Never on the first turn. LiteLLM redacts arguments in its own log
+(`turn_off_message_logging`), so the warning does not show you what failed to
+parse.
+
+**What was true.** Not the tool-call parser. `column 1 (char 0)` means
+`arguments` was an empty string, not truncated JSON — truncated JSON fails
+further along. And the function name survived, so the `<tool_call><function=…>`
+envelope had been matched. Diffing the two checkpoints' chat templates confirmed
+the tool-call block is byte-identical between 3.6 and 3.8, exactly as the swap
+commit claimed. The commit checked the right thing and was right about it.
+
+What the template diff *did* turn up is elsewhere in the same file — one inverted
+default in how *prior* turns are rendered back into the prompt:
+
+```jinja
+3.6:  {%- if (preserve_thinking is defined and preserve_thinking is true) or (loop.index0 > ns.last_query_index) %}
+3.8:  {%- if preserve_thinking is undefined or preserve_thinking is true  or  loop.index0 > ns.last_query_index %}
+```
+
+Undefined went from false to true, and `gateway/config.yaml` had never set it —
+there was no reason to. On 3.8 that means every prior assistant turn comes back
+wrapped in `<think>…</think>`, and because OpenAI-format clients do not
+round-trip `reasoning_content`, those blocks are **empty**: one per assistant
+turn, accumulating with conversation length, in a position where the model was
+trained to see real reasoning. 3.8 also drops the fallback that used to split a
+literal `<think>` block out of `content`, so anything arriving that way is
+double-wrapped instead of extracted.
+
+That would degrade a model gradually rather than break it, which is why it looked
+like a candidate for the symptom above. It is not confirmed to be one, and the
+primary checkpoint does not have the inversion at all.
+
+**What changed.** Both aliases now pin `preserve_thinking: false` explicitly,
+which restores the 3.6 behaviour and is a no-op on 3.6. It is a gateway-side
+chat-template kwarg, so the fix needs a LiteLLM restart and no engine reload.
+`verify.sh` asserts it is set on both aliases — the point is that it is
+*explicit*, not that the value is unusual.
+
+`verify.sh` also gained a second tool-calling probe. The existing one sent a
+single turn and one short `city` argument and asserted only that `tool_calls` was
+truthy, so it stayed green throughout: it never rendered a history and never
+requested an argument that could fail this way. The new probe puts a prior
+assistant tool call in `messages`, asks for a multi-line `content`, and asserts
+the arguments parse as JSON with both required keys non-empty.
+
+**The general lesson.** The 3.8 swap was prepared by checking the axis expected
+to break — the tool-call format — and that check was correct. But a chat template
+is not one contract, it is several: how history is replayed, what the kwarg
+defaults are, what gets stripped from prior content. Those moved while the
+format held. **Diff the whole template, not the part you changed models for.** A
+default you never set is not yours; it belongs to the checkpoint and can invert
+underneath you without appearing in any diff of your own files.
+
+Second-order, and the part that actually cost the time here: a diagnosis that
+explains the symptom is not the same as the cause of it. This one was assembled
+from a real template inversion, a matching failure shape, and an assumption about
+which checkpoint was live — and the last of those was never checked against
+`scripts/.env` until `verify.sh` printed the model name back. **Confirm what is
+running before explaining why it broke.**
+
+Third: a 200 with a warning is a silent failure. The gateway did not fail,
+LiteLLM did not fail, and only the agent at the far end noticed — as behaviour,
+not as an error.
+
+---
+
 ## Cost
 
 ### `localhost` is two addresses, and the wrong one can be somebody else

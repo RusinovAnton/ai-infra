@@ -12,7 +12,7 @@ model_list:
       # an uncapped client still burns GPU hours.
       max_tokens: 8192
       extra_body:
-        chat_template_kwargs: {enable_thinking: false}
+        chat_template_kwargs: {enable_thinking: false, preserve_thinking: false}
 
   # Architecture, hard debugging, tricky refactors.
   - model_name: coder-max
@@ -25,7 +25,7 @@ model_list:
       # burned GPU time and produced nothing, presenting as a broken model.
       max_tokens: 32768
       extra_body:
-        chat_template_kwargs: {enable_thinking: true}
+        chat_template_kwargs: {enable_thinking: true, preserve_thinking: false}
 
 router_settings:
   routing_strategy: simple-shuffle    # one deployment per alias; nothing to balance

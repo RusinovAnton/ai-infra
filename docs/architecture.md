@@ -22,7 +22,7 @@ user of the endpoint reads.
 | **Gateway stack** | Running. Both aliases served, keys issued/scoped/revoked against Postgres, engine-down path returning an actionable 503, mock engine for onboarding without a GPU. Stood up at **$0**. |
 | **GPU node** | Rented, provisioned, benchmarked and destroyed repeatedly. Tailnet join, provenance check, tool calling, drain and destroy all exercised live. |
 | **Performance** | First real numbers taken 2026-08-06 — see [Measured performance](#measured-performance). Single-stream matches the arithmetic; the concurrency criterion does not. |
-| **Not yet done** | The Qwen3.6-27B A/B and the TP=1-vs-TP=2 comparison (both need a second card). Offsite backups. Key-naming convention and developer onboarding. |
+| **Not yet done** | The 27B A/B — `Qwen3.8-27B-FP8` is the prepared candidate, `scripts/.env` still points at the MoE primary. The TP=1-vs-TP=2 comparison (needs a second card). Offsite backups. Key-naming convention and developer onboarding. |
 
 `./verify.sh --disruptive` → **69 passed / 0 failed / 18 skipped** with provider
 credentials present, **65 / 0 / 20** on a fresh clone. Every skip is GPU- or
@@ -226,7 +226,15 @@ avoids community-quant provenance risk on a brand-new architecture.
 
 The alternative considered seriously is **Qwen3.6-27B**, which is the stronger
 model on paper (SWE-bench 77.2 vs 73.4, Terminal-Bench 2.0 59.3 vs 51.5). It
-loses on throughput, and the reasoning is worth keeping:
+loses on throughput, and the reasoning is worth keeping.
+
+**`Qwen3.8-27B-FP8` supersedes it as the prepared candidate** — geometrically
+identical text tower, same 30.9 GB, same parsers — so the throughput argument
+below applies to it unchanged and was not re-derived. What is *not* carried over
+is the chat template: 3.8 inverts the `preserve_thinking` default, which
+`gateway/config.yaml` now pins explicitly on both aliases *before* the swap,
+because the value is a no-op on the current primary and load-bearing on 3.8. See
+[lessons.md](lessons.md#a-checkpoints-chat-template-is-several-contracts-not-one).
 
 A dense 27B reads all 27B parameters per token; the MoE reads ~3B. A single
 opencode or Claude Code task spans many turns and tens of thousands of output
@@ -868,7 +876,7 @@ signal.
   TTFT p95 > ~5 s, or `vllm:num_preemptions_total` climbing during normal hours,
   or agents routinely truncating at 65k. Try prefix caching first.
 - **A task-class failure the reasoning budget cannot close** → reconsider
-  `Qwen3.6-27B-FP8`. At 30.9 GB this is now a same-card swap of `MODEL_ID` /
+  `Qwen3.8-27B-FP8`. At 30.9 GB this is now a same-card swap of `MODEL_ID` /
   `MODEL_REVISION`, not the permanent 2-GPU BF16 commitment this line used to
   describe. Expect ~3 concurrent streams instead of ~6, and much slower decode.
   Bench it against `bench/tasks/` before believing the benchmark delta.

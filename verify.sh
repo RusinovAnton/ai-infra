@@ -444,6 +444,18 @@ printf '%s\n' "$cmax" | while read -r name val; do
 done
 grep -q 'enable_thinking: false' gateway/config.yaml && ok "coder disables thinking via chat_template_kwargs" || bad "coder does not disable thinking"
 grep -q 'enable_thinking: true'  gateway/config.yaml && ok "coder-max enables thinking" || bad "coder-max does not enable thinking"
+# preserve_thinking must be set EXPLICITLY, on both aliases, because the default
+# is not a property of this repo — it is a property of the checkpoint's chat
+# template, and it changed under us. Qwen3.6 defaulted to false; Qwen3.8 flipped
+# the same condition to default true, which re-renders every prior assistant turn
+# wrapped in <think></think>. OpenAI-format clients do not round-trip
+# reasoning_content, so those blocks come back EMPTY and accumulate with turn
+# count until the model's own tool-call output degrades. Explicit false restores
+# the 3.6 behaviour and is a no-op on 3.6 itself. Both aliases: this lives in the
+# message loop, not behind enable_thinking, so `coder` is affected too.
+[ "$(grep -c 'preserve_thinking: false' gateway/config.yaml)" -eq 2 ] \
+  && ok "both aliases pin preserve_thinking: false (prior-turn <think> stripped)" \
+  || bad "preserve_thinking not pinned false on BOTH aliases — on Qwen3.8 the template default is true and empty <think> blocks accumulate across turns"
 
 head_ "15. Privacy and reliability settings in force"
 grep -q 'turn_off_message_logging: true' gateway/config.yaml \
@@ -639,9 +651,69 @@ print(("reason" if msg.get("reasoning_content") else "noreason"),
       -d "{\"model\":\"$alias\",\"messages\":[{\"role\":\"user\",\"content\":\"What is the weather in Berlin?\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]}" \
       | python3 -c 'import sys,json;print("yes" if json.load(sys.stdin)["choices"][0]["message"].get("tool_calls") else "no")' 2>/dev/null)
     [ "$tc" = yes ] && ok "$alias: structured tool_calls, not prose" || bad "$alias: no tool_calls — check TOOL_CALL_PARSER in scripts/.env matches MODEL_ID"
+
+    # The check above asserts the ENVELOPE and nothing else, and an envelope can
+    # arrive intact around arguments that are an empty string. That is what a
+    # Qwen3.8 swap actually did to us: `tool_calls` present, function name
+    # correct, `arguments` unparseable, HTTP 200. LiteLLM logs a warning and
+    # returns success, so nothing upstream fails — the agent just gets a tool
+    # call it cannot execute.
+    #
+    # Two things this probe does that the one above cannot:
+    #   - a PRIOR assistant tool call in `messages`, so the template's history
+    #     path runs at all. The single-turn probe never reaches it, which is why
+    #     it stayed green through the whole incident.
+    #   - a multi-line `content` argument with quotes and newlines, which is the
+    #     shape write/edit/bash carry and the shape that failed. `city` cannot
+    #     fail this way.
+    # The payload is built by python3 rather than written inline: it nests a JSON
+    # document inside a JSON string (tool_calls[].function.arguments), and every
+    # way of quoting that by hand in shell gets one escaping layer wrong.
+    payload=$(python3 - "$alias" <<'PY'
+import json, sys
+tool = {"type": "function", "function": {
+    "name": "write_file", "description": "Write a file to disk",
+    "parameters": {"type": "object", "properties": {
+        "path": {"type": "string"},
+        "content": {"type": "string", "description": "Full file contents, may span multiple lines"}},
+        "required": ["path", "content"]}}}
+print(json.dumps({"model": sys.argv[1], "tools": [tool], "messages": [
+    {"role": "user", "content": "Create hello.py that prints hi."},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function",
+        "function": {"name": "write_file",
+                     "arguments": json.dumps({"path": "hello.py", "content": "print('hi')\n"})}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "wrote hello.py"},
+    {"role": "user", "content": "Now write notes.py: a three-line Python function that prints a "
+                                "dict containing a double-quoted string and a newline escape. "
+                                "Use the tool."}]}))
+PY
+)
+    args=$(curl -s -m 300 "$GW/v1/chat/completions" -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+      -H 'Content-Type: application/json' --data-binary "$payload" | python3 -c '
+import sys, json
+try:
+    tc = json.load(sys.stdin)["choices"][0]["message"].get("tool_calls") or []
+except Exception:
+    tc = []
+if not tc:
+    print("notc badargs nokeys"); raise SystemExit
+try:
+    d = json.loads(tc[0].get("function", {}).get("arguments"))
+except Exception:
+    print("tc badargs nokeys"); raise SystemExit
+ok = isinstance(d, dict) and str(d.get("path", "")).strip() and str(d.get("content", "")).strip()
+print("tc", "args", "keys" if ok else "nokeys")' 2>/dev/null)
+    read -r a_tc a_args a_keys <<<"$args"
+    [ "$a_tc" = tc ] && ok "$alias: tool_calls survive a multi-turn history" \
+      || bad "$alias: no tool_calls once a prior assistant tool call is in the history — single-turn tool calling still works, so suspect the chat template's history path, not TOOL_CALL_PARSER"
+    [ "$a_args" = args ] && ok "$alias: tool-call arguments parse as JSON" \
+      || bad "$alias: arguments are NOT valid JSON — HTTP 200 with an unusable tool call. Check gateway.log for 'Failed to parse tool call arguments'"
+    [ "$a_keys" = keys ] && ok "$alias: required args present and non-empty (multi-line content)" \
+      || bad "$alias: arguments parsed but path/content missing or empty — parameter extraction is dropping multi-line values"
   done
 else
   skip "tool calling on each alias returns structured tool_calls"
+  skip "tool-call arguments parse as JSON across a multi-turn history"
   skip "coder (thinking off): no <think>, no reasoning_content"
   skip "coder-max (thinking on): reasoning separated from content, both non-empty"
   skip "coder-max long task: never finish_reason=length with empty content"
