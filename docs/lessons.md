@@ -224,6 +224,20 @@ made twice in one session, the second time while deliberately trying to fix the
 first. `--check-capacity` now prints all three hosts and marks which one needs
 the write grant.
 
+**Nothing the provider tells you about a key is evidence of what it can do.** The
+console shows a scoped key as read/write; GraphQL reports `permissions: "RW"` for
+it. Both said exactly that about a key whose every write returned 403, next to a
+full-access key reporting the same string that worked. Three scoped keys were
+issued before we accepted that the metadata carries no information. Only the
+probe answers the question — which is the argument for `--check-capacity`
+performing an actual write rather than reading a permissions field.
+
+We never did get a scoped key to work here and stopped trying; the launch runs on
+a full-access one. Least privilege was the right instinct and the provider did not
+honour it. If you pick this up again, the evidence to hand support is: `GET
+/v1/pods` 200, `DELETE /v1/pods/<anything>` 403 with zero bytes, `PATCH` the same,
+`permissions: "RW"` throughout.
+
 ### A refused write arrives as no bytes at all, and we printed it
 
 **What it looked like.** `gpu-up.sh` rotated the engine secret, logged `creating
