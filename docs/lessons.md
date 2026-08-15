@@ -209,6 +209,21 @@ API — every path 400s with "does not exist in the specification". They live on
 the GraphQL endpoint, which needs its own scope on the API key. Do not conclude a
 capability is missing because one API surface lacks it.
 
+There are **three** hosts, and a scoped API key grants per host:
+
+| host | what lives there | this repo needs |
+|---|---|---|
+| `api.runpod.io/graphql` | gpu types, prices, stock, pod logs | read |
+| `rest.runpod.io/v1` | pods, network volumes — the control plane | read + write |
+| `api.runpod.ai` | serverless endpoint invocation | nothing |
+
+The names are close enough to swap by eye — `.io` against `.ai` — and a key with
+write on the serverless host reads *identically* to a read-only key: reads pass
+on both surfaces, every control-plane write 403s with no body. That mistake was
+made twice in one session, the second time while deliberately trying to fix the
+first. `--check-capacity` now prints all three hosts and marks which one needs
+the write grant.
+
 ### A refused write arrives as no bytes at all, and we printed it
 
 **What it looked like.** `gpu-up.sh` rotated the engine secret, logged `creating

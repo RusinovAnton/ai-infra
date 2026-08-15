@@ -64,9 +64,14 @@ provider_capacity() {
   local dc st pr any=1 gpu gpus
   case "$(rp_write_check)" in
     yes) log "API key: writes permitted" ;;
-    no)  log "API key: READ-ONLY — every write returns HTTP 403 with an empty body."
+    no)  log "API key: READ-ONLY on ${RP} — every write returns HTTP 403, empty body."
          log "  A launch gets as far as rotating the engine secret and then fails."
-         log "  Fix the key's permissions before renting anything." ;;
+         log "  If this is a scoped key, check WHICH HOST the write grant landed on."
+         log "  Three different hosts, and only two of them are this repo's business:"
+         log "    ${RP_GQL}   read  — gpu types, prices, stock"
+         log "    ${RP}       WRITE — pods and volumes; this is the one that matters"
+         log "    api.runpod.ai                   serverless invocation; unused here"
+         log "  Granting write on the serverless host reads exactly like this." ;;
     *)   log "API key: could not determine write permission (no answer from the API)" ;;
   esac
   gpus="$(rp_candidate_ids)" || return 1
