@@ -281,6 +281,9 @@ rsp="$(sed -nE 's/^REASONING_PARSER=(.+)$/\1/p' scripts/.env 2>/dev/null | head 
 case "$mid" in
   *GLM-4.7*)  want_tcp=glm47;       want_rsp=glm47 ;;
   *Qwen3.6*)  want_tcp=qwen3_coder; want_rsp=qwen3 ;;
+  # Qwen3.5-122B-A10B: same parsers as 3.6, and the same values Qwen publishes in
+  # their own vLLM launch commands for it.
+  *Qwen3.5*)  want_tcp=qwen3_coder; want_rsp=qwen3 ;;
   *)          want_tcp="";          want_rsp="" ;;
 esac
 if [ -n "$want_tcp" ]; then
@@ -300,6 +303,47 @@ if [ "$tp" -ge 2 ] && [ "$ipc" -eq 0 ]; then
   bad "TP=$tp but ipc: host is commented out — multi-GPU startup will fail cryptically"
 else
   ok "ipc: host matches TP=$tp"
+fi
+
+# GPU_COUNT and TP are two spellings of one decision, and .env.example has always
+# claimed they move together. Nothing checked it. GPU_COUNT=2 with TP=1 rents and
+# pays for a card the engine never touches; TP=2 with GPU_COUNT=1 fails at init.
+gcount="$(sed -nE 's/^GPU_COUNT=([0-9]+).*/\1/p' scripts/.env 2>/dev/null | head -1)"; gcount="${gcount:-1}"
+[ "$gcount" = "$tp" ] && ok "GPU_COUNT=$gcount matches TP=$tp" \
+  || bad "GPU_COUNT=$gcount but TP=$tp — either a rented card goes unused, or the engine asks for one that is not there"
+
+# A quantization kernel is named explicitly only for the GPTQ MoE checkpoint, and
+# it is not optional there: vLLM otherwise takes gptq_marlin from config.json,
+# which is the dense-GPTQ path. Both launch paths must agree with MODEL_ID.
+vq="$(sed -nE 's/^VLLM_QUANTIZATION=(.+)$/\1/p' scripts/.env 2>/dev/null | head -1)"
+vqline="$(grep -cE '^\s*-\s*--quantization=' "$G" || true)"
+case "$mid" in
+  *GPTQ*|*gptq*)
+    [ "$vq" = moe_wna16 ] && ok "VLLM_QUANTIZATION=moe_wna16 for the GPTQ MoE checkpoint" \
+      || bad "MODEL_ID=$mid is GPTQ MoE but VLLM_QUANTIZATION is '${vq:-unset}' — vLLM would take the dense gptq_marlin path"
+    [ "$vqline" -ge 1 ] && ok "--quantization is uncommented in $G (matches the GPTQ MODEL_ID)" \
+      || bad "--quantization is still commented out in $G — the VM/compose path would launch without it"
+    ;;
+  *)
+    [ -z "$vq" ] && ok "VLLM_QUANTIZATION unset (correct: vLLM reads FP8/BF16 out of config.json)" \
+      || bad "VLLM_QUANTIZATION='$vq' but MODEL_ID=$mid is not a GPTQ checkpoint — this overrides a correct choice with a guess"
+    [ "$vqline" -eq 0 ] && ok "--quantization stays commented in $G for a non-GPTQ MODEL_ID" \
+      || bad "--quantization is uncommented in $G but MODEL_ID=$mid is not GPTQ"
+    ;;
+esac
+
+# The FP8 allowlist may be widened to Ampere ONLY while serving a checkpoint that
+# does not use FP8 (the 2 × A6000 INT4 config). Left widened after switching back,
+# it produces exactly the failure the allowlist exists to prevent: Ampere rented
+# for an FP8 checkpoint, served slowly, with nothing to announce it.
+fam="$(sed -nE 's/^GPU_FP8_FAMILIES=(.+)$/\1/p' scripts/.env 2>/dev/null | head -1)"
+if printf '%s' "$fam" | grep -qE 'A6000|A40|A100|RTX 30'; then
+  case "$mid" in
+    *FP8*|*fp8*) bad "GPU_FP8_FAMILIES has been widened to Ampere ($fam) while MODEL_ID=$mid is an FP8 checkpoint — revert the widening" ;;
+    *)           ok "GPU_FP8_FAMILIES widened to Ampere, and MODEL_ID=$mid does not use FP8" ;;
+  esac
+else
+  ok "GPU_FP8_FAMILIES excludes Ampere (default)"
 fi
 
 # ================================================================ gateway
@@ -524,6 +568,19 @@ case "$(sed -nE 's/^MODEL_ID=(.+)$/\1/p' scripts/.env 2>/dev/null | head -1)" in
     # weight figure leaves room for — see docs/design-notes.md §11.
     skip "peak VRAM vs the 86.4 GB budget (96 GB x 0.90) — reconcile weights vs the ~29.7 GB KV measured"
     ;;
+  *Qwen3.5-122B*)
+    # 12 full-attention layers (1 in 4 of 48) x 2 KV heads x head_dim 256 x 2 B x 2.
+    skip "vLLM startup log: per-token KV in the ~24 kB class, not the ~20 kB 35B figure"
+    # Arithmetic, not a measurement — and the recurrent state is the reason it
+    # needs checking rather than trusting: ~151 MB per sequence x max_num_seqs is
+    # subtracted from the same pool. At max_num_seqs=16 that is 2.4 GB.
+    skip "KV cache at startup consistent with ~769k tokens / ~12 streams at 65k (2 x 48 GB, max_num_seqs=16)"
+    # The line that says whether the GPTQ MoE kernel was actually taken. A silent
+    # fall back to the dense path is a throughput loss with no error:
+    #   docker logs ai-infra-vllm 2>&1 | grep -i 'moe_wna16\|gptq\|quantization'
+    skip "startup log names moe_wna16 — NOT a fall back to gptq_marlin"
+    skip "peak VRAM vs the 86.4 GB budget (2 x 48 GB x 0.90) against 65.05 GB of weights"
+    ;;
   *Qwen3.6-27B*)
     # Dense, 16/64 full-attention layers against the MoE's ~10/40 — so ~3x the
     # per-token KV of the primary on the SAME card. Reading the ~20 kB figure
@@ -658,7 +715,19 @@ if [ -f scripts/.env ]; then
   if out=$( cd "$REPO_ROOT" && ./scripts/gpu-up.sh --dry-run 2>&1 ); then
     case "$out" in
       *Traceback*|*KeyError*) bad "gpu-up.sh --dry-run raised a python error: $(printf '%s' "$out" | tail -2)" ;;
-      *'"name": "ai-infra-gpu"'*) ok "gpu-up.sh --dry-run builds a valid pod request" ;;
+      *'"name": "ai-infra-gpu"'*)
+        ok "gpu-up.sh --dry-run builds a valid pod request"
+        # The pod env is an explicit allowlist, so an engine flag added to
+        # provision.sh but not to that list never reaches the node — the pod
+        # fetches the whole checkpoint and serves the wrong path silently. Assert
+        # every var provision.sh reads optionally is actually carried.
+        for v in VLLM_QUANTIZATION VLLM_LIMIT_MM MAX_NUM_SEQS GPU_MEM_UTIL; do
+          case "$out" in
+            *"$v"*) ok "pod env carries $v" ;;
+            *)      bad "pod env is missing $v — provision.sh reads it, so the node would silently use the default" ;;
+          esac
+        done
+        ;;
       *) skip "gpu-up.sh dry run (pod already exists, so the request build was not exercised)" ;;
     esac
   else

@@ -265,6 +265,13 @@ env = {
     'GPU_MEM_UTIL':   os.environ.get('GPU_MEM_UTIL','0.90'),
     'MAX_NUM_SEQS':   os.environ.get('MAX_NUM_SEQS','64'),
     'VLLM_LIMIT_MM':  os.environ.get('VLLM_LIMIT_MM',''),
+    # Empty for FP8/BF16, where vLLM reads the method out of config.json. Named
+    # only for the GPTQ MoE checkpoint, which needs moe_wna16 — and this env is an
+    # explicit allowlist, so a var missing from it does not reach provision.sh at
+    # all: the pod would fetch 65 GB and serve the dense-GPTQ path silently.
+    # verify.sh asserts the value against MODEL_ID, which is why '' is tolerable
+    # here where the parsers above are not.
+    'VLLM_QUANTIZATION': os.environ.get('VLLM_QUANTIZATION',''),
     'HF_HOME_HOST':   '/runpod-volume' if os.environ.get('RUNPOD_VOLUME_ID','').strip() else '/root/.cache/huggingface',
 }
 req = {

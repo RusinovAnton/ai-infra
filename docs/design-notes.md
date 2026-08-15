@@ -254,6 +254,50 @@ because the wrong version is the one a reader is likely to arrive with.
     governs sizing is the measured one. Worth resolving before trusting the
     80 GB row, where a 6 GB error is the whole margin.
 
+12. **"FP8 needs Ada" was recorded as a hardware rule, and it is a checkpoint
+    rule** (2026-08-12). `GPU_FP8_FAMILIES` excludes Ampere because serving an
+    FP8 checkpoint on it is a silent performance loss, and
+    [architecture.md](architecture.md#the-gpu-generation-is-constrained-by-fp8)
+    stated the conclusion as a property of the *GPU*. Adding the
+    Qwen3.5-122B-A10B config made the difference matter: only its GPTQ-Int4 build
+    fits 96 GB, INT4 is Ampere's native low precision, and 2 × A6000 (~$0.66/hr)
+    is less than half of 2 × L40S for the same VRAM. On that config Ampere is
+    correct hardware and the allowlist is simply wrong about it.
+
+    So the allowlist is model-dependent — like `GPU_MIN_VRAM_GB` above it, which
+    item 11 already established. It stays an allowlist, and widening it stays a
+    deliberate edit, but the widening is only valid while `MODEL_ID` is non-FP8.
+    That pairing is now asserted: `verify.sh` fails an Ampere-widened
+    `GPU_FP8_FAMILIES` against an FP8 `MODEL_ID`, because reverting a model swap
+    and forgetting the allowlist line reproduces exactly the invisible failure the
+    allowlist was written to prevent.
+
+    Same shape as item 10, one layer up: **a check that asserts today's hardware
+    policy rather than the invariant behind it fails in both directions.** The
+    invariant is "never serve FP8 weights on a card without FP8 tensor cores", and
+    it says nothing about renting Ampere.
+
+13. **Which checkpoint of a model to serve is decided by arithmetic before
+    judgement, and it is worth doing that arithmetic first** (2026-08-12). Qwen
+    publishes Qwen3.5-122B-A10B in BF16 (~250 GB), FP8 (~127 GB) and GPTQ-Int4
+    (65.05 GB). At 2 × 48 GB and 0.90 utilisation — 86.4 GB — two of the three are
+    eliminated before any question of quality, provenance or price is asked, and
+    the survivor then settles the hardware choice on its own.
+
+    The part that does not follow from weights alone: `--max-num-seqs` is a
+    **sizing** decision on this architecture, not a ceiling. 36 of 48 layers are
+    linear attention holding ~151 MB of recurrent state *per sequence*, from the
+    same pool as KV, so the default 64 slots spend 9.7 GB of the 21.3 GB the
+    weights leave and back fewer streams than 16 slots do (~7 against ~12 at 65k).
+    A knob that reads like a limit is really a claim on memory — the same trap as
+    the 256 default that fails Qwen3.6 init outright, but quieter, because here it
+    succeeds and just costs concurrency.
+
+    All of this is arithmetic, and the GLM measurement in item 11 came in 40%
+    better than its own arithmetic. Read the cache size off the first startup log
+    before believing any of the numbers above; `verify.sh` lists them as skips
+    against this `MODEL_ID` so they are checked rather than remembered.
+
 ## The provider boundary
 
 The gateway knows one thing about the engine: a URL. That is the whole coupling,

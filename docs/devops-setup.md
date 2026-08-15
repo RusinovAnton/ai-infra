@@ -671,3 +671,155 @@ docker logs ai-infra-vllm 2>&1 | grep -i "auto-round\|awq\|quantization"
   not practical; budget for water cooling on owned hardware.
 - **Used, out-of-warranty Ampere** — the generation `gpu-up.sh` excludes by
   allowlist on the rented path.
+
+## 10. The big model: Qwen3.5-122B-A10B on 2 × A6000 or 2 × L40S
+
+122B total parameters, 10B activated. This is the config for "the 35B is not
+strong enough on our real tasks", and it is the first two-card config that also
+works on **rented** hardware — §9 is for a box you own or a vast.ai instance.
+
+Sizes and revisions below were read from the Hugging Face API on 2026-08-12.
+
+### 10.1 Only one of the three checkpoints fits
+
+Two 48 GB cards is 96 GB; at 0.90 utilisation, 86.4 GB usable. Qwen publishes
+three builds and the arithmetic eliminates two of them before any judgement:
+
+| Checkpoint | Weights | Fits 86.4 GB |
+|---|---|---|
+| `Qwen/Qwen3.5-122B-A10B` (BF16) | ~250 GB | no |
+| `Qwen/Qwen3.5-122B-A10B-FP8` | ~127 GB (123.0B FP8 + 2.06B BF16) | no |
+| `Qwen/Qwen3.5-122B-A10B-GPTQ-Int4` | **65.05 GB**, 39 shards | yes |
+
+That also answers the hardware question, and it is the opposite of §9's
+conclusion: **because the surviving checkpoint is INT4, FP8 tensor cores are
+irrelevant here.** A6000 is Ampere and cannot do FP8, and for this config that
+costs nothing — INT4 is Ampere's native low precision. Live pricing at the time
+of writing makes 2 × A6000 (~$0.66/hr) less than half of 2 × L40S (~$1.58/hr),
+for the same 96 GB.
+
+Unlike §9, this is an **official Qwen checkpoint**. The provenance allowlist in
+`gpu/provision.sh` already passes it, so there is no security decision to make
+and no repackager to trust. That is the strongest argument for reaching for a
+bigger official quant before a community quant of a smaller model.
+
+`Qwen3_5MoeForConditionalGeneration` — the architecture the pinned engine image
+already serves for Qwen3.6, so vLLM support is not a new question. It is also a
+vision-language model, like everything else in this family; see
+[architecture.md](architecture.md#these-are-vision-language-models).
+
+### 10.2 max_num_seqs is a sizing decision, not a ceiling
+
+36 of the 48 layers are linear attention, each holding a constant-size recurrent
+state **per decode sequence**: 64 value heads × 128 head dim × 128 key head dim ×
+4 B (`mamba_ssm_dtype` is float32) = 4.19 MB per layer, **~151 MB per sequence**.
+That comes out of the same pool as KV cache, so the default 64 slots quietly
+spend nearly half of what the weights leave behind:
+
+```
+86.4 GB usable - 65.05 GB weights = 21.3 GB for state + KV
+  max_num_seqs=64  ->  9.7 GB state,  ~11.6 GB KV  ->  ~7 concurrent 65k streams
+  max_num_seqs=16  ->  2.4 GB state,  ~18.9 GB KV  -> ~12 concurrent 65k streams
+```
+
+KV is 24 kB/token — 12 full-attention layers (1 in 4 of 48) × 2 KV heads ×
+`head_dim` 256 × 2 B × 2. So 16 is the setting: it buys five more streams than
+the default by *not* reserving slots the cache cannot back.
+
+**All of the above is arithmetic.** Activations, NCCL buffers and vLLM's
+multimodal profiling reservation land in the same 21.3 GB. Read the real cache
+size off the first startup log before believing the table.
+
+### 10.3 Config changes
+
+In `scripts/.env` — the block is written out and commented in
+[.env.example](../scripts/.env.example):
+
+```
+MODEL_ID=Qwen/Qwen3.5-122B-A10B-GPTQ-Int4
+MODEL_REVISION=30cd92cba9707a9aba09d1e490ed4b66b78e9606
+VLLM_QUANTIZATION=moe_wna16
+GPU_COUNT=2
+TP=2
+MAX_NUM_SEQS=16
+```
+
+The parsers do **not** change: `qwen3_coder` and `qwen3`, which are also the
+values Qwen publishes in their own vLLM launch commands for this checkpoint.
+
+**`VLLM_QUANTIZATION` is not optional here.** Qwen puts `--quantization
+moe_wna16` in every command they publish for it; without it vLLM reads
+`quant_method: gptq` from `config.json` and takes the dense-GPTQ path
+(`gptq_marlin`) for an MoE model. That is a throughput loss with no error
+attached, which is why `verify.sh` asserts it against `MODEL_ID`.
+
+Then two lines in `gpu/docker-compose.yml`, **in the same change** — `verify.sh`
+fails until both are done:
+
+1. Uncomment `ipc: host` (TP ≥ 2, same as §9.3).
+2. Uncomment the `--quantization=${VLLM_QUANTIZATION...}` line, so the VM/compose
+   path launches with the kernel the RunPod path gets from `provision.sh`.
+
+If you are **renting** rather than owning, one more line — A6000 is excluded from
+the shortlist by `GPU_FP8_FAMILIES`, and widening it is legitimate here because
+FP8 is not in play:
+
+```
+GPU_FP8_FAMILIES="Ada|Blackwell|L40|H100|H200|H800|B200|B300|GB200|GB300|RTX 40|RTX 50|A6000|A40"
+```
+
+⚠️ **Revert that when `MODEL_ID` goes back to an FP8 checkpoint.** Left widened,
+it produces exactly the failure the allowlist exists to prevent: Ampere rented to
+serve FP8, slowly, with nothing to announce it. `verify.sh` fails the
+combination, which is the only reason it is safe to write down at all.
+
+Two more things about renting: the shortlist filters VRAM and price **per card**,
+so `GPU_MIN_VRAM_GB=48` and `GPU_MAX_PRICE=1.20` are unchanged — but the bill is
+`GPU_COUNT` × the price it prints. And 65.05 GB of weights fits
+`RUNPOD_DISK_GB=120` alongside the image; a weights volume for this checkpoint
+alone wants ~100 GB.
+
+### 10.4 Interconnect
+
+TP=2 here is mandatory, not an economy measure, so the §9 reasoning about NVLink
+paying for itself does not transfer. A6000 takes a 2-way NVLink bridge on owned
+hardware; L40S has none, so tensor parallelism crosses PCIe either way on rented
+pods. Measure decode throughput before assuming the interconnect is the problem —
+an MoE reading 10B activated parameters is a different bandwidth story from the
+35B's 3B.
+
+### 10.5 Verify
+
+```bash
+./verify.sh --disruptive
+```
+
+Must be 0 failed. Then the checkpoint-specific numbers `verify.sh` lists as skips
+for this `MODEL_ID`, read off the startup log — per-token KV in the ~24 kB class,
+a cache consistent with ~769k tokens, and peak VRAM against the 86.4 GB budget.
+
+The one check that only matters on this config — confirm the MoE kernel was
+actually taken and did not fall back:
+
+```bash
+docker logs ai-infra-vllm 2>&1 | grep -i "moe_wna16\|gptq\|quantization"
+```
+
+### 10.6 What you are accepting
+
+- **INT4 answer quality on a 122B**, against FP8 on a 35B. That trade is the
+  whole question, and it is a `scripts/bench.sh` run against `bench/tasks/`, not
+  a benchmark table. Do it before adopting.
+- **~3× the activated parameters per token** (10B vs 3B), so decode is slower per
+  stream. The §"Models and task routing" argument in
+  [architecture.md](architecture.md#models-and-task-routing) — that throughput
+  converts into quality while quality does not convert back — applies here and
+  cuts against this config. It has to lose a real task class to be worth it.
+- **A generation older.** Qwen3.6 ships only in 27B and 35B-A3B — there is no
+  3.6-generation large MoE, so going bigger means going back to 3.5. You are
+  trading generation for parameter count, and generation is where the coding and
+  agentic gains of 3.6 over 3.5 live. This is the reason to run §10.6's bench
+  rather than assuming 122B > 35B.
+- **Two cards billed hourly**, and an idle guard that matters twice as much.
+- **A widened FP8 allowlist** on the rented path, correct only while `MODEL_ID`
+  stays INT4.

@@ -26,7 +26,9 @@ services:
     network_mode: host
     # TP=1 needs no shared-memory segment between workers. If a second GPU is
     # ever added, uncomment this the SAME DAY — without it multi-GPU startup
-    # fails with a cryptic NCCL error.
+    # fails with a cryptic NCCL error. Both two-card configs in scripts/.env.example
+    # (2 × 3090, and Qwen3.5-122B on 2 × A6000/L40S) need it; verify.sh fails if
+    # TP >= 2 and this is still commented.
     # ipc: host
     volumes:
       # The persistent network volume, mounted at the HF cache path so
@@ -56,6 +58,9 @@ services:
       - --gpu-memory-utilization=0.90
       # One Mamba cache block per decode sequence; 256 default does not fit
       # beside a 65k context on 48 GB. Must match provision.sh.
+      # On Qwen3.5-122B (2 × 48 GB, INT4) this is a sizing decision rather than a
+      # ceiling: ~151 MB of recurrent state per sequence, so 64 slots eat 9.7 GB of
+      # the 21.3 GB left after weights. See scripts/.env.example.
       - --max-num-seqs=${MAX_NUM_SEQS:-64}            # fraction of the WHOLE card, not of what remains
       - --api-key=${ENGINE_SECRET:?}             # defence in depth; the ACL is the real control
       # Renamed by vLLM from --disable-log-requests. Must match provision.sh.
@@ -76,6 +81,18 @@ services:
       # If CUDA graph capture fails, this is the knob — the default (512) can
       # exceed the Mamba cache size on this architecture.
       # - --max-cudagraph-capture-size=256
+      #
+      # QUANTIZED-MoE CHECKPOINTS ONLY. Stays commented for FP8 and BF16, where
+      # vLLM reads the method out of config.json and choosing for it would replace
+      # a correct decision with a guess.
+      #
+      # Uncomment for Qwen/Qwen3.5-122B-A10B-GPTQ-Int4, in the SAME change that
+      # points MODEL_ID at it. Qwen publishes `--quantization moe_wna16` in every
+      # launch command for that checkpoint; without it vLLM takes gptq_marlin from
+      # the config's quant_method, which is the dense-GPTQ path and not the MoE
+      # one. The value comes from scripts/.env, beside MODEL_ID, so this file and
+      # provision.sh cannot disagree about it. verify.sh asserts the pairing.
+      # - --quantization=${VLLM_QUANTIZATION:?set in scripts/.env, beside MODEL_ID}
       #
       # NOTE — this checkpoint is easily assumed to be text-only. It is not, and so
       # is every other Qwen3.6 candidate including the 27B A/B: all are
